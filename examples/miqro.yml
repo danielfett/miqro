@@ -1,0 +1,8 @@
+broker:
+  host: localhost
+  port: 1883
+  keepalive: 60
+log_level: DEBUG
+services:
+  echo:
+    custom_value: "Use for service-specific configuration values"

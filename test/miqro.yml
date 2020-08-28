@@ -1,0 +1,8 @@
+broker:
+  host: localhost
+  port: 18883
+  keepalive: 60
+log_level: DEBUG
+services:
+  test1:
+    nothing_to_see_here: 
