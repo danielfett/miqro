@@ -9,6 +9,7 @@ from pathlib import Path
 from time import sleep
 from typing import Callable, Dict, List, Optional
 import random
+from inspect import signature
 
 import paho.mqtt.client as mqtt
 from yaml import safe_load
@@ -19,12 +20,14 @@ class Loop:
     interval: timedelta
     next_call: Optional[datetime] = None
 
-    STARTUP_VARIABILITY = 30 # up to x seconds
+    STARTUP_VARIABILITY = 30  # up to x seconds
 
     def __init__(self, fn, interval):
         self.fn = fn
         self.interval = interval
-        self.next_call = datetime.now() + timedelta(seconds=random.randint(0, self.STARTUP_VARIABILITY))
+        self.next_call = datetime.now() + timedelta(
+            seconds=random.randint(0, self.STARTUP_VARIABILITY)
+        )
 
     def run_if_needed(self, instance, now):
         if self.next_call is None or now >= self.next_call:
@@ -62,10 +65,27 @@ def handle(topic_ext):
 
     return class_decorator
 
+
+def handle_global(topic):
+    # See https://stackoverflow.com/questions/2366713/can-a-decorator-of-an-instance-method-access-the-class
+    class class_decorator:
+        def __init__(self, fn):
+            self.fn = fn
+
+        def __set_name__(self, owner, name):
+            if owner.MQTT_GLOBAL_HANDLERS == {}:
+                owner.MQTT_GLOBAL_HANDLERS = {}
+            owner.MQTT_GLOBAL_HANDLERS[topic] = self.fn
+
+    return class_decorator
+
+
 def accept_json(fn):
     def actual_fn(self, arg):
         return fn(self, **json.loads(arg))
+
     return actual_fn
+
 
 class Service:
     SERVICE_NAME: str = "none"
@@ -74,21 +94,23 @@ class Service:
     LOOP_INTERVAL: float = 0.2
     LOOPS: List[Loop] = []
     MQTT_HANDLERS: Dict = {}
+    MQTT_GLOBAL_HANDLERS: Dict = {}
 
     log: logging.Logger
     config: Dict
     service_config: Dict
     data_topic_prefix: str
     mqtt_client: mqtt
-    ignore_recv_topics: List[str]
+    # ignore_recv_topics: List[str]
     stop = False
 
-    def __init__(self, add_config_file_path=None):
+    def __init__(self, add_config_file_path=None, log_level=logging.DEBUG):
         if add_config_file_path is not None:
             self.CONFIG_FILE_PATHS.insert(0, Path(add_config_file_path))
 
-        self.prepare_logger()
+        self.prepare_logger(log_level)
         self.read_config()
+        self.prepare_handlers()
 
         self.mqtt_client = mqtt.Client(self.SERVICE_NAME)
         self.mqtt_client.on_connect = self.on_connect
@@ -100,21 +122,21 @@ class Service:
 
         self.enabled = True
 
-        self.ignore_recv_topics = []
+        # self.ignore_recv_topics = []
 
         self.log.info("started")
 
-    def prepare_logger(self):
+    def prepare_logger(self, log_level):
         log_handler = logging.StreamHandler(sys.stderr)
         log_handler.setFormatter(
             logging.Formatter("%(asctime)s  %(name)s  %(levelname)s \t%(message)s")
         )
         log_handler.setLevel(logging.DEBUG)
         logging.getLogger().addHandler(log_handler)
-        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger().setLevel(log_level)
 
-        self.log = logging.getLogger(self.SERVICE_NAME)
-        self.mqtt_log = logging.getLogger(self.SERVICE_NAME)
+        self.log = logging.getLogger(self.SERVICE_NAME + ".main")
+        self.mqtt_log = logging.getLogger(self.SERVICE_NAME + ".mqtt")
         self.mqtt_log.setLevel(logging.INFO)
 
     def read_config(self):
@@ -143,49 +165,60 @@ class Service:
         )
         self.willtopic = self.data_topic_prefix + "online"
 
+    def prepare_handlers(self):
+        for topic, handler in self.MQTT_HANDLERS.items():
+            self.MQTT_GLOBAL_HANDLERS[self.data_topic_prefix + topic] = handler
+
     def on_connect(self, client, userdata, flags, rc):
         self.log.info(f"MQTT connected, client={client}, userdata={userdata}, rc={rc}")
         client.publish(self.willtopic, "1", retain=True)
         self.log.info(f"Subscribing to ...")
-        for topic in list(self.MQTT_HANDLERS.keys()) + ["enable"]:
-            self.log.info(f"  - {self.data_topic_prefix}{topic}")
-            client.subscribe(self.data_topic_prefix + topic)
+
+        for topic in list(self.MQTT_GLOBAL_HANDLERS.keys()):
+            self.log.info(f"  - {topic}")
+            client.subscribe(topic)
 
     def on_disconnect(self, client, userdata, rc):
         self.log.warning(f"MQTT disconnected, rc={rc}")
 
+    @handle("enable")
+    def on_enable(self, payload):
+        if payload == "1":
+            self.enabled = True
+        else:
+            self.enabled = False
+        self.log.info(f"set enabled to {self.enabled!r}")
+        return
+
     def on_message(self, client, userdata, msg):
-        stripped_topic = msg.topic[len(self.data_topic_prefix) :]
         payload = str(msg.payload.decode("ascii")).strip()
         self.log.debug(
-            f"Received MQTT message on topic {stripped_topic} containing {payload}"
+            f"Received MQTT message on topic {msg.topic} containing {payload}"
         )
 
-        if stripped_topic == "enable":
-            if payload == "1":
-                self.enabled = True
+        for topic, handler in self.MQTT_GLOBAL_HANDLERS.items():
+            if "#" in topic:
+                prefix = topic[:-1]
+                self.log.debug(f"matching {prefix} against {msg.topic}")
+                if msg.topic.startswith(prefix):
+                    handler(self, payload, msg.topic[len(prefix) :])
+                    return
             else:
-                self.enabled = False
-            self.log.info(f"set enabled to {self.enabled!r}")
-            return
-
-        for topic_ext, handler in self.MQTT_HANDLERS.items():
-            if topic_ext == stripped_topic:
-                handler(self, payload)
-                return
+                if topic == msg.topic:
+                    handler(self, payload)
+                    return
 
         if getattr(self, "handle_message", None) is not None and self.handle_message(
-            stripped_topic, payload
+            msg.topic, payload
         ):
             return
 
-        if stripped_topic not in self.ignore_recv_topics:
-            self.log.error(f"Unhandled topic! {self.ignore_recv_topics}")
+        self.log.error(f"Unhandled topic! {msg.topic}")
 
     def publish(self, ext, message):
         topic = self.data_topic_prefix + ext
-        if ext not in self.ignore_recv_topics:
-            self.ignore_recv_topics.append(ext)
+        # if ext not in self.ignore_recv_topics:
+        #    self.ignore_recv_topics.append(ext)
         message = self.round_floats(message)
         self.log.debug(f"MQTT publish: {topic}: {message}")
         try:
@@ -229,11 +262,14 @@ def run(service):
     parser.add_argument(
         "--install", action="store_true", help="Setup this service as a systemd unit."
     )
+    parser.add_argument(
+        "--verbose", '-v', action="store_true"
+    )
 
     args = parser.parse_args()
 
     if not args.install:
-        service(getattr(parser, "config", None)).run()
+        service(getattr(parser, "config", None), logging.DEBUG if args.verbose else logging.INFO).run()
         return
 
     filename = Path(inspect.getfile(service))
