@@ -20,7 +20,7 @@ class Loop:
     interval: timedelta
     next_call: Optional[datetime] = None
 
-    STARTUP_VARIABILITY = 30  # up to x seconds
+    STARTUP_VARIABILITY = 3  # up to x seconds
 
     def __init__(self, fn, interval):
         self.fn = fn
@@ -215,25 +215,25 @@ class Service:
 
         self.log.error(f"Unhandled topic! {msg.topic}")
 
-    def publish(self, ext, message):
+    def publish(self, ext, message, retain=False):
         topic = self.data_topic_prefix + ext
         # if ext not in self.ignore_recv_topics:
         #    self.ignore_recv_topics.append(ext)
         message = self.round_floats(message)
         self.log.debug(f"MQTT publish: {topic}: {message}")
         try:
-            self.mqtt_client.publish(topic, message)
+            self.mqtt_client.publish(topic, message, retain=retain)
         except Exception as e:
             self.log.exception(e)
 
-    def publish_json(self, ext, message_json):
-        self.publish(ext, json.dumps(self.round_floats(message_json)))
+    def publish_json(self, ext, message_json, retain=False):
+        self.publish(ext, json.dumps(self.round_floats(message_json)), retain=retain)
 
-    def publish_json_keys(self, message_dict, ext=None):
+    def publish_json_keys(self, message_dict, ext=None, retain=False):
         for key, value in message_dict.items():
             if ext:
                 key = ext + "/" + key
-            self.publish(key, value)
+            self.publish(key, value, retain=retain)
 
     def run(self):
         self.mqtt_client.loop_start()
@@ -262,14 +262,15 @@ def run(service):
     parser.add_argument(
         "--install", action="store_true", help="Setup this service as a systemd unit."
     )
-    parser.add_argument(
-        "--verbose", '-v', action="store_true"
-    )
+    parser.add_argument("--verbose", "-v", action="store_true")
 
     args = parser.parse_args()
 
     if not args.install:
-        service(getattr(parser, "config", None), logging.DEBUG if args.verbose else logging.INFO).run()
+        service(
+            getattr(parser, "config", None),
+            logging.DEBUG if args.verbose else logging.INFO,
+        ).run()
         return
 
     filename = Path(inspect.getfile(service))
