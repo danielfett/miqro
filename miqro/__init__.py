@@ -95,6 +95,11 @@ class Service:
     LOOPS: List[Loop] = []
     MQTT_HANDLERS: Dict = {}
     MQTT_GLOBAL_HANDLERS: Dict = {}
+    MQTT_ONLINE_UPDATE_INTERVAL: int = 180
+
+    QOS_MAX_ONCE = 0
+    QOS_AT_LEAST_ONCE = 1
+    QOS_EXACTLY_ONCE = 2
 
     log: logging.Logger
     config: Dict
@@ -111,6 +116,8 @@ class Service:
         self.prepare_logger(log_level)
         self.read_config()
         self.prepare_handlers()
+
+        self.last_key_values = {}
 
         self.mqtt_client = mqtt.Client(self.SERVICE_NAME)
         self.mqtt_client.on_connect = self.on_connect
@@ -171,7 +178,6 @@ class Service:
 
     def on_connect(self, client, userdata, flags, rc):
         self.log.info(f"MQTT connected, client={client}, userdata={userdata}, rc={rc}")
-        client.publish(self.willtopic, "1", retain=True)
         self.log.info(f"Subscribing to ...")
 
         for topic in list(self.MQTT_GLOBAL_HANDLERS.keys()):
@@ -189,6 +195,10 @@ class Service:
             self.enabled = False
         self.log.info(f"set enabled to {self.enabled!r}")
         return
+
+    @loop(seconds=MQTT_ONLINE_UPDATE_INTERVAL)
+    def update_online_status(self):
+        self.mqtt_client.publish(self.willtopic, "1", retain=True)
 
     def on_message(self, client, userdata, msg):
         payload = str(msg.payload.decode("ascii")).strip()
@@ -215,25 +225,56 @@ class Service:
 
         self.log.error(f"Unhandled topic! {msg.topic}")
 
-    def publish(self, ext, message, retain=False):
+    def publish(
+        self, ext, message, retain=False, qos=QOS_MAX_ONCE, only_if_changed=False
+    ):
         topic = self.data_topic_prefix + ext
         # if ext not in self.ignore_recv_topics:
         #    self.ignore_recv_topics.append(ext)
         message = self.round_floats(message)
+
+        if only_if_changed is True:
+            last_message = self.last_key_values.get(topic, None)
+            if last_message == message:
+                return
+            else:
+                self.last_key_values[topic] = message
+        elif isinstance(only_if_changed, timedelta):
+            now = datetime.now()
+            last_message, last_time = self.last_key_values.get(topic, (None, None))
+            if last_message == message and last_time + only_if_changed > now:
+                return
+            else:
+                self.last_key_values[topic] = (message, now)
+
         self.log.debug(f"MQTT publish: {topic}: {message}")
         try:
-            self.mqtt_client.publish(topic, message, retain=retain)
+            self.mqtt_client.publish(topic, message, retain=retain, qos=qos)
         except Exception as e:
             self.log.exception(e)
 
-    def publish_json(self, ext, message_json, retain=False):
-        self.publish(ext, json.dumps(self.round_floats(message_json)), retain=retain)
+    def publish_json(
+        self, ext, message_json, retain=False, qos=QOS_MAX_ONCE, only_if_changed=False
+    ):
+        self.publish(
+            ext,
+            json.dumps(self.round_floats(message_json)),
+            retain=retain,
+            only_if_changed=only_if_changed,
+        )
 
-    def publish_json_keys(self, message_dict, ext=None, retain=False):
+    def publish_json_keys(
+        self,
+        message_dict,
+        ext=None,
+        retain=False,
+        qos=QOS_MAX_ONCE,
+        only_if_changed=False,
+    ):
         for key, value in message_dict.items():
             if ext:
                 key = ext + "/" + key
-            self.publish(key, value, retain=retain)
+            self.publish(key, value, retain=retain, only_if_changed=only_if_changed)
 
     def run(self):
         self.mqtt_client.loop_start()
