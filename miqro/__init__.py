@@ -3,13 +3,10 @@ import inspect
 import json
 import logging
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import sleep
 from typing import Callable, Dict, List, Optional
-import random
-from inspect import signature
 
 import paho.mqtt.client as mqtt
 from yaml import safe_load
@@ -20,19 +17,39 @@ class Loop:
     interval: timedelta
     next_call: Optional[datetime] = None
 
-    STARTUP_VARIABILITY = 3  # up to x seconds
-
-    def __init__(self, fn, interval):
+    def __init__(self, fn, interval, start=True):
         self.fn = fn
         self.interval = interval
-        self.next_call = datetime.now() + timedelta(
-            seconds=random.randint(0, self.STARTUP_VARIABILITY)
-        )
+        if start:
+            self.next_call = datetime.now()
 
     def run_if_needed(self, instance, now):
-        if self.next_call is None or now >= self.next_call:
+        if self.next_call and now >= self.next_call:
             if self.fn(instance) is not False:
                 self.next_call = now + self.interval
+
+    def start(self, delayed=False):
+        if delayed:
+            self.next_call = datetime.now() + self.interval
+        else:
+            self.next_call = datetime.now()
+
+    def stop(self):
+        self.next_call = None
+
+    def restart(self, delayed=False):
+        self.start(delayed=delayed)
+
+    def get_remaining(self) -> Optional[timedelta]:
+        if self.next_call is None:
+            return None
+        return self.next_call - datetime.now()
+
+    def add_to(self, service):
+        if not service.LOOPS:
+            service.LOOPS = []
+        service.LOOPS.append(self)
+        return self
 
 
 # args/kwargs can be anything that the constructor of timedelta accepts
@@ -43,11 +60,7 @@ def loop(*args, **kwargs):
             self.fn = fn
 
         def __set_name__(self, owner, name):
-            ml = Loop(self.fn, timedelta(*args, **kwargs))
-
-            if owner.LOOPS == []:
-                owner.LOOPS = []
-            owner.LOOPS.append(ml)
+            Loop(self.fn, timedelta(*args, **kwargs)).add_to(owner)
 
     return class_decorator
 
@@ -106,20 +119,20 @@ class Service:
     service_config: Dict
     data_topic_prefix: str
     mqtt_client: mqtt
-    # ignore_recv_topics: List[str]
     stop = False
 
-    def __init__(self, add_config_file_path=None, log_level=logging.DEBUG):
+    def __init__(
+        self, add_config_file_path=None, log_level=logging.DEBUG, mqtt_client_cls=mqtt.Client
+    ):
         if add_config_file_path is not None:
             self.CONFIG_FILE_PATHS.insert(0, Path(add_config_file_path))
 
         self.prepare_logger(log_level)
         self.read_config()
-        self.prepare_handlers()
 
         self.last_key_values = {}
 
-        self.mqtt_client = mqtt.Client(self.SERVICE_NAME)
+        self.mqtt_client = mqtt_client_cls(self.SERVICE_NAME)
         self.mqtt_client.on_connect = self.on_connect
         self.mqtt_client.on_disconnect = self.on_disconnect
         self.mqtt_client.on_message = self.on_message
@@ -132,6 +145,9 @@ class Service:
         # self.ignore_recv_topics = []
 
         self.log.info("started")
+
+    def __str__(self):
+        return self.SERVICE_NAME
 
     def prepare_logger(self, log_level):
         log_handler = logging.StreamHandler(sys.stderr)
@@ -153,6 +169,8 @@ class Service:
                 with path.open("r") as f:
                     self.config = safe_load(f)
                     break
+            else:
+                self.log.debug(f"NOT using configuration file at {path}")
         else:
             raise Exception(
                 "Config file not found; searched paths: "
@@ -161,7 +179,7 @@ class Service:
 
         if self.SERVICE_NAME not in self.config["services"]:
             self.log.warning(
-                "Service configuration not found in 'services' section of configuration file. Using empty configuration."
+                f"Service configuration for {self.SERVICE_NAME} not found in 'services' section of configuration file {path}. Using empty configuration."
             )
             self.service_config = {}
         else:
@@ -172,17 +190,15 @@ class Service:
         )
         self.willtopic = self.data_topic_prefix + "online"
 
-    def prepare_handlers(self):
-        for topic, handler in self.MQTT_HANDLERS.items():
-            self.MQTT_GLOBAL_HANDLERS[self.data_topic_prefix + topic] = handler
-
     def on_connect(self, client, userdata, flags, rc):
         self.log.info(f"MQTT connected, client={client}, userdata={userdata}, rc={rc}")
         self.log.info(f"Subscribing to ...")
 
-        for topic in list(self.MQTT_GLOBAL_HANDLERS.keys()):
+        for topic, _ in self._all_handlers():
             self.log.info(f"  - {topic}")
             client.subscribe(topic)
+
+        self.mqtt_client.publish(self.willtopic, "1", retain=True)
 
     def on_disconnect(self, client, userdata, rc):
         self.log.warning(f"MQTT disconnected, rc={rc}")
@@ -196,9 +212,37 @@ class Service:
         self.log.info(f"set enabled to {self.enabled!r}")
         return
 
+    def add_handler(self, topic, handler):
+        self.MQTT_HANDLERS[topic] = handler
+
+        if self.mqtt_client and self.mqtt_client.is_connected():
+            self.log.info(f"Subscribing to {self.data_topic_prefix + topic}")
+            self.mqtt_client.subscribe(self.data_topic_prefix + topic)
+
+    def add_global_handler(self, topic, handler):
+        """
+        Add a global handler for a topic.
+        The handler will be called with the topic and payload as arguments.
+        """
+        self.MQTT_GLOBAL_HANDLERS[topic] = handler
+
+        if self.mqtt_client and self.mqtt_client.is_connected():
+            self.log.info(f"Subscribing to {topic}")
+            self.mqtt_client.subscribe(topic)
+
     @loop(seconds=MQTT_ONLINE_UPDATE_INTERVAL)
     def update_online_status(self):
-        self.mqtt_client.publish(self.willtopic, "1", retain=True)
+        try:
+            self.mqtt_client.publish(self.willtopic, "1", retain=True)
+        except Exception as e:
+            self.log.exception(e)
+
+    def _all_handlers(self):
+        for topic, handler in self.MQTT_GLOBAL_HANDLERS.items():
+            yield topic, handler
+
+        for topic, handler in self.MQTT_HANDLERS.items():
+            yield self.data_topic_prefix + topic, handler
 
     def on_message(self, client, userdata, msg):
         payload = str(msg.payload.decode("ascii")).strip()
@@ -206,7 +250,7 @@ class Service:
             f"Received MQTT message on topic {msg.topic} containing {payload}"
         )
 
-        for topic, handler in self.MQTT_GLOBAL_HANDLERS.items():
+        for topic, handler in self._all_handlers():
             if "#" in topic:
                 prefix = topic[:-1]
                 self.log.debug(f"matching {prefix} against {msg.topic}")
@@ -231,11 +275,20 @@ class Service:
         topic = self.data_topic_prefix + ext
         # if ext not in self.ignore_recv_topics:
         #    self.ignore_recv_topics.append(ext)
-        message = self.round_floats(message)
+        if type(message) == type(True):  # type is boolean
+            message = 1 if message else 0
+        elif message is None:
+            message = ""
+        elif type(message) in [dict, list]:
+            self.publish_json(ext, message, retain, qos, only_if_changed)
+            return
+        else:
+            message = self.round_floats(message)
 
         if only_if_changed is True:
             last_message = self.last_key_values.get(topic, None)
             if last_message == message:
+                self.log.debug(f"{topic} not changed, not publishing.")
                 return
             else:
                 self.last_key_values[topic] = message
@@ -243,6 +296,9 @@ class Service:
             now = datetime.now()
             last_message, last_time = self.last_key_values.get(topic, (None, None))
             if last_message == message and last_time + only_if_changed > now:
+                self.log.debug(
+                    f"{topic} not changed since {only_if_changed.total_seconds()}s, not publishing."
+                )
                 return
             else:
                 self.last_key_values[topic] = (message, now)
@@ -299,18 +355,33 @@ def run(service):
     parser = argparse.ArgumentParser(
         description=f"{service.SERVICE_NAME} MIQRO service"
     )
-    parser.add_argument("--config", "-c", help="config file")
+    parser.add_argument("--config", "-c", help="config file", default=None)
     parser.add_argument(
         "--install", action="store_true", help="Setup this service as a systemd unit."
     )
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument(
+        "--mqtt-debug-prefix",
+        "-d",
+        help="Prefix for all outgoing MQTT messages for debugging purposes",
+        default=None,
+    )
+    cli_args = parser.parse_args()
 
-    args = parser.parse_args()
 
-    if not args.install:
+    class DebugMQTTClient(mqtt.Client):
+        def publish(self, topic, *args, **kwargs):
+            return super().publish(cli_args.mqtt_debug_prefix + topic, *args, **kwargs)
+
+        def will_set(self, topic, *args, **kwargs):
+            return super().will_set(cli_args.mqtt_debug_prefix + topic, *args, **kwargs)
+
+
+    if not cli_args.install:
         service(
-            getattr(parser, "config", None),
-            logging.DEBUG if args.verbose else logging.INFO,
+            cli_args.config,
+            logging.DEBUG if cli_args.verbose else logging.INFO,
+            DebugMQTTClient if cli_args.mqtt_debug_prefix else None,
         ).run()
         return
 
