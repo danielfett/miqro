@@ -9,7 +9,7 @@ from time import sleep
 from typing import Callable, Dict, List, Optional, Tuple
 
 import paho.mqtt.client as mqtt
-from yaml import safe_load
+from yaml import safe_load, dump
 
 
 class Loop:
@@ -62,6 +62,8 @@ def loop(*args, **kwargs):
             self.fn = fn
 
         def __set_name__(self, owner: "Service", name):
+            if not owner.PREPARED_LOOPS:
+                owner.PREPARED_LOOPS = []
             owner.PREPARED_LOOPS.append((self.fn, timedelta(*args, **kwargs)))
 
     return class_decorator
@@ -102,6 +104,62 @@ def accept_json(fn):
     return actual_fn
 
 
+class State:
+    """Store data in a YAML file."""
+
+    service: "Service"
+
+    DATA_ROOT = Path("/var/lib/miqro/data")
+
+    def __init__(self, service) -> None:
+        self.service = service
+        self._file = self.DATA_ROOT / (service.SERVICE_NAME + ".yaml")
+
+        try:
+            if not self._file.exists():
+                self._file.parent.mkdir(parents=True, exist_ok=True)
+                self._data = {}
+            else:
+                with self._file.open() as f:
+                    self._data = safe_load(f)
+        except PermissionError as e:
+            service.log.error(e)
+            self._data = {}
+
+        self.service.log.debug(f"State: Loaded {self._data}")
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __setitem__(self, key, value):
+        self._data[key] = value
+
+    def set_path(self, *keys, value):
+        self.service.log.debug(f"State: Setting {keys} to {value}")
+        d = self._data
+        for key in keys[:-1]:  # -1 because we don't want to set the last key
+            if not key in d:
+                d[key] = {}
+            d = d[key]
+
+        d[keys[-1]] = value
+
+    def get_path(self, *keys, default):
+        d = self._data
+        for key in keys:
+            if not key in d:
+                self.service.log.debug(f"State: {key} not found, returning '{default}'")
+                return default
+            d = d[key]
+
+        self.service.log.debug(f"State: {keys} found, returning {d}")
+        return d
+
+    def save(self):
+        with self._file.open("w") as f:
+            dump(self._data, f)
+
+
 class Service:
     SERVICE_NAME: str = "none"
     CONFIG_FILE_PATHS: List[Path] = [Path("miqro.yml"), Path("/etc/miqro.yml")]
@@ -112,6 +170,8 @@ class Service:
     CLASS_MQTT_HANDLERS: List[Tuple[str, Callable]] = []
     CLASS_MQTT_GLOBAL_HANDLERS: List[Tuple[str, Callable]] = []
     MQTT_ONLINE_UPDATE_INTERVAL: int = 180
+
+    USE_STATE_FILE = False
 
     QOS_MAX_ONCE = 0
     QOS_AT_LEAST_ONCE = 1
@@ -126,12 +186,14 @@ class Service:
     is_connected = False
     mqtt_handlers: List[Tuple[str, Callable]]
     mqtt_global_handlers: List[Tuple[str, Callable]]
+    state: Optional[State] = None
 
     def __init__(
         self,
         add_config_file_path=None,
         log_level=logging.DEBUG,
         mqtt_client_cls=mqtt.Client,
+        state_cls=State,
     ):
         self.prepare_logger(log_level)
         self.read_config(add_config_file_path)
@@ -151,7 +213,11 @@ class Service:
         if not self.LOOPS:
             self.LOOPS = []
         self.mqtt_handlers = [h for h in self.CLASS_MQTT_HANDLERS]
+        self.mqtt_handlers.append(("enabled", self.on_enable))
         self.mqtt_global_handlers = [h for h in self.CLASS_MQTT_GLOBAL_HANDLERS]
+
+        if self.USE_STATE_FILE:
+            self.state = state_cls(self)
 
         self.create_loops()
 
@@ -161,6 +227,10 @@ class Service:
         return self.SERVICE_NAME
 
     def create_loops(self):
+        Loop(
+            self.update_online_status,
+            timedelta(seconds=self.MQTT_ONLINE_UPDATE_INTERVAL),
+        ).add_to(self)
         for fn, interval in self.PREPARED_LOOPS:
             Loop(fn, interval).add_to(self)
 
@@ -225,15 +295,6 @@ class Service:
         self.log.warning(f"MQTT disconnected, rc={rc}")
         self.is_connected = False
 
-    @handle("enable")
-    def on_enable(self, payload):
-        if payload == "1":
-            self.enabled = True
-        else:
-            self.enabled = False
-        self.log.info(f"set enabled to {self.enabled!r}")
-        return
-
     def add_handler(self, topic, handler):
         self.mqtt_handlers.append((topic, handler))
 
@@ -253,8 +314,15 @@ class Service:
             self.log.info(f"Subscribing to {topic}")
             self.mqtt_client.subscribe(topic)
 
-    @loop(seconds=MQTT_ONLINE_UPDATE_INTERVAL)
-    def update_online_status(self):
+    def on_enable(self, payload):
+        if payload == "1":
+            self.enabled = True
+        else:
+            self.enabled = False
+        self.log.info(f"set enabled to {self.enabled!r}")
+        return
+
+    def update_online_status(self, _):
         try:
             self.mqtt_client.publish(self.willtopic, "1", retain=True)
         except Exception as e:
@@ -374,7 +442,7 @@ class Service:
         for key, value in message_dict.items():
             if ext:
                 key = ext + "/" + key
-            #print(key, type(value))
+            # print(key, type(value))
             if type(value) is dict:
                 self.publish_json_keys(
                     value, key, retain, qos, only_if_changed, global_
