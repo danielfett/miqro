@@ -458,10 +458,13 @@ class Service:
 
     def _loop_step(self):
         assert self.LOOPS is not None
-        now = datetime.now()
+        loop_started = datetime.now()
         for loop in self.LOOPS:
-            loop.run_if_needed(self, now)
-        sleep(self.LOOP_INTERVAL)
+            loop.run_if_needed(self, loop_started)
+        
+        time_to_sleep = self.LOOP_INTERVAL  - (datetime.now() - loop_started).total_seconds()
+        if time_to_sleep > 0:
+            sleep(time_to_sleep)
 
     def run(self):
         self.mqtt_client.loop_start()
