@@ -195,15 +195,15 @@ class Service:
         mqtt_client_cls=mqtt.Client,
         state_cls=State,
     ):
-        self.prepare_logger(log_level)
-        self.read_config(add_config_file_path)
+        self._prepare_logger(log_level)
+        self._read_config(add_config_file_path)
 
         self.last_key_values = {}
 
         self.mqtt_client = mqtt_client_cls(self.SERVICE_NAME)
-        self.mqtt_client.on_connect = self.on_connect
-        self.mqtt_client.on_disconnect = self.on_disconnect
-        self.mqtt_client.on_message = self.on_message
+        self.mqtt_client.on_connect = self._on_connect
+        self.mqtt_client.on_disconnect = self._on_disconnect
+        self.mqtt_client.on_message = self._on_message
         self.mqtt_client.enable_logger(self.mqtt_log)
         self.mqtt_client.will_set(self.willtopic, "0", retain=True)
         self.mqtt_client.connect_async(**self.config["broker"])
@@ -213,28 +213,28 @@ class Service:
         if not self.LOOPS:
             self.LOOPS = []
         self.mqtt_handlers = [h for h in self.CLASS_MQTT_HANDLERS]
-        self.mqtt_handlers.append(("enabled", self.on_enable))
+        self.mqtt_handlers.append(("enabled", self._on_enable))
         self.mqtt_global_handlers = [h for h in self.CLASS_MQTT_GLOBAL_HANDLERS]
 
         if self.USE_STATE_FILE:
             self.state = state_cls(self)
 
-        self.create_loops()
+        self._create_loops()
 
         self.log.info("started")
 
     def __str__(self):
         return self.SERVICE_NAME
 
-    def create_loops(self):
+    def _create_loops(self):
         Loop(
-            self.update_online_status,
+            self._update_online_status,
             timedelta(seconds=self.MQTT_ONLINE_UPDATE_INTERVAL),
         ).add_to(self)
         for fn, interval in self.PREPARED_LOOPS:
             Loop(fn, interval).add_to(self)
 
-    def prepare_logger(self, log_level):
+    def _prepare_logger(self, log_level):
         if not logging.getLogger().hasHandlers():
             log_handler = logging.StreamHandler(sys.stderr)
             log_handler.setFormatter(
@@ -248,7 +248,7 @@ class Service:
         self.mqtt_log = logging.getLogger(self.SERVICE_NAME + ".mqtt")
         self.mqtt_log.setLevel(logging.INFO)
 
-    def read_config(self, add_config_file_path=None):
+    def _read_config(self, add_config_file_path=None):
         paths = self.CONFIG_FILE_PATHS
         if add_config_file_path:
             paths.insert(0, Path(add_config_file_path))
@@ -280,7 +280,7 @@ class Service:
         )
         self.willtopic = self.data_topic_prefix + "online"
 
-    def on_connect(self, client, userdata, flags, rc):
+    def _on_connect(self, client, userdata, flags, rc):
         self.log.info(f"MQTT connected, client={client}, userdata={userdata}, rc={rc}")
         self.is_connected = True
         self.log.info(f"Subscribing to ...")
@@ -291,7 +291,7 @@ class Service:
 
         self.mqtt_client.publish(self.willtopic, "1", retain=True)
 
-    def on_disconnect(self, client, userdata, rc):
+    def _on_disconnect(self, client, userdata, rc):
         self.log.warning(f"MQTT disconnected, rc={rc}")
         self.is_connected = False
 
@@ -314,7 +314,7 @@ class Service:
             self.log.info(f"Subscribing to {topic}")
             self.mqtt_client.subscribe(topic)
 
-    def on_enable(self, payload):
+    def _on_enable(self, payload):
         if payload == "1":
             self.enabled = True
         else:
@@ -322,7 +322,7 @@ class Service:
         self.log.info(f"set enabled to {self.enabled!r}")
         return
 
-    def update_online_status(self, _):
+    def _update_online_status(self, _):
         try:
             self.mqtt_client.publish(self.willtopic, "1", retain=True)
         except Exception as e:
@@ -335,7 +335,7 @@ class Service:
         for topic, handler in self.mqtt_handlers:
             yield self.data_topic_prefix + topic, handler
 
-    def on_message(self, client, userdata, msg):
+    def _on_message(self, client, userdata, msg):
         payload = str(msg.payload.decode("utf-8", errors="replace")).strip()
         self.log.debug(
             f"Received MQTT message on topic {msg.topic} containing {payload}"
@@ -387,7 +387,7 @@ class Service:
             self.publish_json(ext, message, retain, qos, only_if_changed)
             return
         else:
-            message = self.round_floats(message)
+            message = self._round_floats(message)
 
         if only_if_changed is True:
             last_message = self.last_key_values.get(topic, None)
@@ -424,7 +424,7 @@ class Service:
     ):
         self.publish(
             ext,
-            json.dumps(self.round_floats(message_json)),
+            json.dumps(self._round_floats(message_json)),
             retain=retain,
             only_if_changed=only_if_changed,
             global_=global_,
@@ -472,13 +472,13 @@ class Service:
             self._loop_step()
         self.mqtt_client.loop_stop()
 
-    def round_floats(self, o):
+    def _round_floats(self, o):
         if isinstance(o, float):
             return round(o, self.JSON_FLOAT_PRECISION)
         if isinstance(o, dict):
-            return {k: self.round_floats(v) for k, v in o.items()}
+            return {k: self._round_floats(v) for k, v in o.items()}
         if isinstance(o, (list, tuple)):
-            return [self.round_floats(x) for x in o]
+            return [self._round_floats(x) for x in o]
         return o
 
 

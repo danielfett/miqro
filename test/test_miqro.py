@@ -26,8 +26,8 @@ def test_connect(mqtt_broker):
             Thread.__init__(self)
             miqro.Service.__init__(self, CONFIG_FILE_PATH)
 
-        def on_connect(self, *args, **kwargs):
-            miqro.Service.on_connect(self, *args, **kwargs)
+        def _on_connect(self, *args, **kwargs):
+            miqro.Service._on_connect(self, *args, **kwargs)
             done.set()
 
     testsvc = TestSvc()
