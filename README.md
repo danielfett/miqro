@@ -6,7 +6,16 @@ MIQRO is a Python 3 library that aims to simplify development and operation of M
  * controlling actors, and
  * gathering system information
 
- in smart home and other applications.
+ in smart home and other applications. 
+ 
+ MIQRO aims at providing simple and easy-to-use APIs for common and generally boring tasks in MQTT-based services, in particular,
+
+  * time-based loops, e.g., to retrieve and publish sensor data,
+  * subscribing to topics within a service's base topic,
+  * publishing in JSON and plain formats,
+  * deduplication of unchanged values,
+  * retrieving configuration from a system-wide configuration file,
+  * storing service state.
 
  ## Example
 
@@ -28,7 +37,7 @@ class EchoSvc(miqro.Service):
         )
 
     @miqro.handle("echo")
-    def echo(self, payload):
+    def my_echo_handler(self, payload):
         self.publish("echo_response", payload)
 
 
