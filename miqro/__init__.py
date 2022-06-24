@@ -9,7 +9,7 @@ from time import sleep
 from typing import Callable, Dict, List, Optional, Tuple
 
 import paho.mqtt.client as mqtt
-from yaml import safe_load, dump
+from yaml import load, dump, FullLoader
 
 
 class Loop:
@@ -121,7 +121,7 @@ class State:
                 self._data = {}
             else:
                 with self._file.open() as f:
-                    self._data = safe_load(f)
+                    self._data = load(f, Loader=FullLoader)
         except PermissionError as e:
             service.log.error(e)
             self._data = {}
@@ -156,6 +156,7 @@ class State:
         return d
 
     def save(self):
+        self.service.log.debug(f"State: Saving {self._data}")
         with self._file.open("w") as f:
             dump(self._data, f)
 
@@ -257,7 +258,7 @@ class Service:
             if path.exists():
                 self.log.debug(f"Using configuration file at {path}")
                 with path.open("r") as f:
-                    self.config = safe_load(f)
+                    self.config = load(f, Loader=FullLoader)
                     break
             else:
                 self.log.debug(f"NOT using configuration file at {path}")
