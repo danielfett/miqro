@@ -16,6 +16,8 @@ class Loop:
     fn: Callable
     interval: timedelta
     next_call: Optional[datetime] = None
+    stat_call_count: int = 0
+    stat_cumulative_duration: float = 0.0
 
     def __init__(self, fn, interval, start=True):
         self.fn = fn
@@ -23,12 +25,17 @@ class Loop:
         if start:
             self.next_call = datetime.now()
 
-    def run_if_needed(self, instance, now):
+    def run_if_needed(self, instance):
+        now = datetime.now()
         if self.next_call and now >= self.next_call:
             if self.fn(instance) is not False:
                 self.next_call = now + self.interval
+                self.stat_call_count += 1
+                self.stat_cumulative_duration += (datetime.now() - now).total_seconds()
+                return self.next_call
             else:
                 self.stop()
+        return None
 
     def start(self, delayed=False):
         if delayed:
@@ -47,11 +54,22 @@ class Loop:
             return None
         return self.next_call - datetime.now()
 
-    def add_to(self, service):
-        if not service.LOOPS:
-            service.LOOPS = []
-        service.LOOPS.append(self)
-        return self
+    def stat_reset(self):
+        self.stat_call_count = 0
+        self.stat_cumulative_duration = 0.0
+
+    def stat_get(self):
+        average_call_duration = (
+            0
+            if not self.stat_call_count
+            else (self.stat_cumulative_duration / self.stat_call_count)
+        )
+        load = average_call_duration / self.interval.total_seconds()
+        is_critical = load > 1
+        return self.stat_call_count, average_call_duration, load, is_critical
+
+    def __str__(self):
+        return f"Loop({self.fn.__name__})"
 
 
 # args/kwargs can be anything that the constructor of timedelta accepts
@@ -165,12 +183,12 @@ class Service:
     SERVICE_NAME: str = "none"
     CONFIG_FILE_PATHS: List[Path] = [Path("miqro.yml"), Path("/etc/miqro.yml")]
     JSON_FLOAT_PRECISION: int = 4
-    LOOP_INTERVAL: float = 0.2
+    MAX_LOOP_INTERVAL: float = 0.2
     PREPARED_LOOPS: List[Tuple[Callable, timedelta]] = []
     LOOPS: Optional[List[Loop]] = None
     CLASS_MQTT_HANDLERS: List[Tuple[str, Callable]] = []
     CLASS_MQTT_GLOBAL_HANDLERS: List[Tuple[str, Callable]] = []
-    MQTT_ONLINE_UPDATE_INTERVAL: int = 180
+    MQTT_ONLINE_UPDATE_INTERVAL: int = 18
 
     USE_STATE_FILE = False
 
@@ -211,8 +229,6 @@ class Service:
 
         self.enabled = True
 
-        if not self.LOOPS:
-            self.LOOPS = []
         self.mqtt_handlers = [h for h in self.CLASS_MQTT_HANDLERS]
         self.mqtt_handlers.append(("enabled", self._on_enable))
         self.mqtt_global_handlers = [h for h in self.CLASS_MQTT_GLOBAL_HANDLERS]
@@ -228,12 +244,17 @@ class Service:
         return self.SERVICE_NAME
 
     def _create_loops(self):
-        Loop(
-            self._update_online_status,
-            timedelta(seconds=self.MQTT_ONLINE_UPDATE_INTERVAL),
-        ).add_to(self)
+        if not self.LOOPS:
+            self.LOOPS = []
+
+        self.LOOPS.append(
+            Loop(
+                self._update_online_status,
+                timedelta(seconds=self.MQTT_ONLINE_UPDATE_INTERVAL),
+            )
+        )
         for fn, interval in self.PREPARED_LOOPS:
-            Loop(fn, interval).add_to(self)
+            self.LOOPS.append(Loop(fn, interval))
 
     def _prepare_logger(self, log_level):
         if not logging.getLogger().hasHandlers():
@@ -324,10 +345,21 @@ class Service:
         return
 
     def _update_online_status(self, _):
-        try:
-            self.mqtt_client.publish(self.willtopic, "1", retain=True)
-        except Exception as e:
-            self.log.exception(e)
+        self.publish(self.willtopic, "1", retain=True)
+
+        assert self.LOOPS
+
+        self.log.info("Loop stats:")
+        for l in self.LOOPS:
+            call_count, average_call_duration, load, is_critical = l.stat_get()
+            l.stat_reset()
+            self.log.info(
+                f" - {l} called {call_count} times, average duration {average_call_duration}s, load={int(load*100)}%"
+            )
+            if is_critical:
+                self.log.warn(
+                    f"   {l} takes, on average, longer to execute ({average_call_duration}s) than defined interval ({l.interval.total_seconds()})"
+                )
 
     def _all_handlers(self):
         for topic, handler in self.mqtt_global_handlers:
@@ -459,13 +491,14 @@ class Service:
 
     def _loop_step(self):
         assert self.LOOPS is not None
-        loop_started = datetime.now()
+
+        earliest_next_call = datetime.now() + timedelta(seconds=self.MAX_LOOP_INTERVAL)
         for loop in self.LOOPS:
-            loop.run_if_needed(self, loop_started)
-        
-        time_to_sleep = self.LOOP_INTERVAL  - (datetime.now() - loop_started).total_seconds()
-        if time_to_sleep > 0:
-            sleep(time_to_sleep)
+            next_call = loop.run_if_needed(self)
+            if next_call:
+                earliest_next_call = min(earliest_next_call, next_call)
+
+        sleep(max(0, (earliest_next_call - datetime.now()).total_seconds()))
 
     def run(self):
         self.mqtt_client.loop_start()
