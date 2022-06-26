@@ -20,7 +20,7 @@ setuptools.setup(
     ],
     install_requires=[
         'paho.mqtt',
-        'yaml',
+        'pyyaml',
     ],
     python_requires='>=3.6',
 )
