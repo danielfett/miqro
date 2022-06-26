@@ -64,7 +64,10 @@ class Loop:
             if not self.stat_call_count
             else (self.stat_cumulative_duration / self.stat_call_count)
         )
-        load = average_call_duration / self.interval.total_seconds()
+        try:
+            load = average_call_duration / self.interval.total_seconds()
+        except ZeroDivisionError:
+            load = 0
         is_critical = load > 1
         return self.stat_call_count, average_call_duration, load, is_critical
 
@@ -243,18 +246,22 @@ class Service:
     def __str__(self):
         return self.SERVICE_NAME
 
-    def _create_loops(self):
+    def add_loop(self, loop):
         if not self.LOOPS:
             self.LOOPS = []
 
-        self.LOOPS.append(
+        self.LOOPS.append(loop)
+        return loop
+
+    def _create_loops(self):
+        self.add_loop(
             Loop(
                 self._update_online_status,
                 timedelta(seconds=self.MQTT_ONLINE_UPDATE_INTERVAL),
             )
         )
         for fn, interval in self.PREPARED_LOOPS:
-            self.LOOPS.append(Loop(fn, interval))
+            self.add_loop(Loop(fn, interval))
 
     def _prepare_logger(self, log_level):
         if not logging.getLogger().hasHandlers():
