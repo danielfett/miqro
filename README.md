@@ -47,7 +47,7 @@ echosvc.run()
 
 ## Usage
 
-MIQRO services are created by subclassing `miqro.Service`. The class property `SERVICE_NAME` must be set to a unique name for the servcie. The MQTT base topic and the system service name will be derived from this name - as described below in more detail.
+MIQRO services are created by subclassing `miqro.Service`. The class property `SERVICE_NAME` must be set to a unique name for the service. The MQTT base topic and the system service name will be derived from this name - as described below in more detail.
 
 A minimal MIQRO service looks as follows:
 
@@ -63,6 +63,24 @@ echosvc.run()
 ```
 
 This service will publish the value `1` to the topic `service/minimal/online` and set a "last will message" to let other services know when the service is down.
+
+Create a custom `__init__` method to initialize the service if needed:
+
+```python
+import miqro
+
+
+class MinimalWithInit(miqro.Service):
+    SERVICE_NAME = "minimal"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        print ("Minimal service now initializeing...")
+        ...
+
+minimalsvc = Minimal()
+minimalsvc.run()
+```
 
 
 ### Subscribing
@@ -144,15 +162,19 @@ Looped functions that return `False` will not be called again.
 
 `miqro.loop` takes the same arguments as [Python's `timedelta`](https://docs.python.org/3/library/datetime.html#timedelta-objects). 
 
-MIQRO outputs information about the execution times of loops in regular intervals.
+MIQRO outputs information about the execution times of loops to the log file in regular intervals.
 
 ### State File
 
-Set `USE_STATE_FILE` to `True` to enable a persistent service state file. This file is intended to store the service's state to restore it after a restart. The file is handled automatically by MIQRO. The contents are available for reading and writing in a dict-like interface under `self.state` within the service. `self.state.save()` must be called to persist the state. The methods `set_path(*keys, value)` and `get_path(*keys, default)` are available to quickly read and update nested dictionary structures. For example, `state.set_path("foo", "bar", 42)` sets `state["foo"]["bar"] = 42` and creates `state["foo"]` and `state["foo"]["bar"]` in case they do not exist already. `state.get_path("foo", "bar", 23)` returns `state["foo"]["bar"]` or `23` if the key does not exist.
+Set `USE_STATE_FILE` to `True` to enable a persistent service state file. This file is intended to store the service's state to restore it after a restart. The file is handled automatically by MIQRO. The contents are available for reading and writing in a dict-like interface under `self.state` within the service. `self.state.save()` must be called to persist the state. The methods `set_path(*keys, value)` and `get_path(*keys, default)` are available to quickly read and update nested dictionary structures. 
+
+For example, `state.set_path("foo", "bar", 42)` sets `state["foo"]["bar"] = 42` and creates `state["foo"]` and `state["foo"]["bar"]` in case they do not exist already. `state.get_path("foo", "bar", 23)` returns `state["foo"]["bar"]` or `23` if the key does not exist.
+
+The state file is not optimized for performance and therefore should only be updated infrequently (e.g., when a setting changes).
 
 ### Configuration file
 
-A `miqro.yml` configuration file is used to define broker settings as well as service-specific configuration values. 
+A `miqro.yml` configuration file is used to define broker settings as well as any service-specific configuration values.
 
 By default, the configuration file (with the name `miqro.yml`) is searched in the current working directory and in `/etc`. A different path can be specified using `add_config_file_path=` in the constructor.
 
@@ -163,7 +185,9 @@ broker:
   host: localhost
   port: 1883
   keepalive: 60
+  
 log_level: DEBUG
+
 services:
 
   echo:
@@ -177,7 +201,19 @@ services:
 
 `broker` takes the same arguments as Paho's `connect()` (see https://www.eclipse.org/paho/index.php?page=clients/python/docs/index.php#connect-reconnect-disconnect).
 
-`services` contains a separate section for each service (using the service's name). The contents of the service configuration can be defined freely for each service. They are available as `self.service_config` within the service.
+`services` contains a separate section for each service (using the service's name). The contents of the service configuration can be defined freely for each service. They are available as `self.service_config` within the service:
+
+```python
+class SomeOtherService(miqro.Service):
+    SERVICE_NAME = "some_other_service"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.some_custom_connection = SomeCustomConnector(
+            self.service_config["has_some"]["custom"][0],
+        )
+```
 
 ### System Service Creation
 

@@ -9,7 +9,7 @@ from time import sleep
 from typing import Callable, Dict, List, Optional, Tuple
 
 import paho.mqtt.client as mqtt
-from yaml import load, dump, FullLoader
+from yaml import FullLoader, dump, load
 
 
 class Loop:
@@ -345,7 +345,7 @@ class Service:
         return
 
     def _update_online_status(self, _):
-        self.publish(self.willtopic, "1", retain=True)
+        self.publish(self.willtopic, "1", retain=True, global_=True)
 
         assert self.LOOPS
 
