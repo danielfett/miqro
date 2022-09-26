@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import sleep
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import paho.mqtt.client as mqtt
 from yaml import FullLoader, dump, load
@@ -19,13 +19,17 @@ class Loop:
     stat_call_count: int = 0
     stat_cumulative_duration: float = 0.0
 
-    def __init__(self, fn, interval, start=True):
+    def __init__(self, fn: Callable, interval: timedelta, start: bool = True):
         self.fn = fn
+
+        if not isinstance(interval, timedelta):
+            raise Exception("interval must be provided as timedelta!")
+
         self.interval = interval
         if start:
             self.next_call = datetime.now()
 
-    def run_if_needed(self, instance):
+    def run_if_needed(self, instance: "Service") -> Optional[datetime]:
         now = datetime.now()
         if self.next_call and now >= self.next_call:
             if self.fn(instance) is not False:
@@ -58,17 +62,17 @@ class Loop:
         self.stat_call_count = 0
         self.stat_cumulative_duration = 0.0
 
-    def stat_get(self):
+    def stat_get(self) -> Tuple[int, float, float, bool]:
         average_call_duration = (
-            0
+            0.0
             if not self.stat_call_count
             else (self.stat_cumulative_duration / self.stat_call_count)
         )
         try:
             load = average_call_duration / self.interval.total_seconds()
         except ZeroDivisionError:
-            load = 0
-        is_critical = load > 1
+            load = 0.0
+        is_critical = load > 1.0
         return self.stat_call_count, average_call_duration, load, is_critical
 
     def __str__(self):
@@ -413,7 +417,7 @@ class Service:
         message,
         retain=False,
         qos=QOS_MAX_ONCE,
-        only_if_changed=False,
+        only_if_changed: Union[bool, timedelta] = False,
         global_=False,
     ):
         topic = (self.data_topic_prefix + ext) if not global_ else ext
@@ -439,7 +443,7 @@ class Service:
         elif isinstance(only_if_changed, timedelta):
             now = datetime.now()
             last_message, last_time = self.last_key_values.get(topic, (None, None))
-            if last_message == message and last_time + only_if_changed > now:
+            if last_message == message and last_time and last_time + only_if_changed > now:
                 self.log.debug(
                     f"{topic} not changed since {only_if_changed.total_seconds()}s, not publishing."
                 )
@@ -459,7 +463,7 @@ class Service:
         message_json,
         retain=False,
         qos=QOS_MAX_ONCE,
-        only_if_changed=False,
+        only_if_changed: Union[bool, timedelta] = False,
         global_=False,
     ):
         self.publish(
@@ -476,7 +480,7 @@ class Service:
         ext=None,
         retain=False,
         qos=QOS_MAX_ONCE,
-        only_if_changed=False,
+        only_if_changed: Union[bool, timedelta] = False,
         global_=False,
     ):
         for key, value in message_dict.items():
