@@ -195,7 +195,7 @@ class Service:
     LOOPS: Optional[List[Loop]] = None
     CLASS_MQTT_HANDLERS: List[Tuple[str, Callable]] = []
     CLASS_MQTT_GLOBAL_HANDLERS: List[Tuple[str, Callable]] = []
-    MQTT_ONLINE_UPDATE_INTERVAL: int = 18
+    MQTT_ONLINE_UPDATE_INTERVAL: int = 180
 
     USE_STATE_FILE = False
 

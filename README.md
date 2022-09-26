@@ -17,6 +17,23 @@ MIQRO aims at providing simple and easy-to-use APIs for common and generally bor
  * retrieving configuration from a system-wide configuration file,
  * storing service state.
 
+## Installing
+
+Via PIP:
+
+```bash
+$ pip3 install miqro
+```
+
+Via this repository:
+
+```bash
+$ git clone https://github.com/danielfett/miqro.git
+$ cd miqro
+$ python3 setup.py install
+```
+
+
 ## Example
 
 This is a simple "echo" microservice:
