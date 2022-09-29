@@ -1,5 +1,4 @@
 import argparse
-import inspect
 import json
 import logging
 import sys
@@ -296,11 +295,11 @@ class Service:
                 self.log.debug(f"NOT using configuration file at {path}")
         else:
             raise Exception(
-                "Config file not found; searched paths: "
+                "No MIQRO config file found; searched paths: "
                 + ", ".join(map(str, self.CONFIG_FILE_PATHS))
             )
 
-        if self.SERVICE_NAME not in self.config["services"]:
+        if self.SERVICE_NAME not in self.config.get("services", {}):
             self.log.warning(
                 f"Service configuration for {self.SERVICE_NAME} not found in 'services' section of configuration file {path}. Using empty configuration."
             )
@@ -559,7 +558,7 @@ def run(service):
         ).run()
         return
 
-    filename = Path(inspect.getfile(service))
+    filename = Path(sys.argv[0])
 
     systemd_service_name = f"miqro_{service.SERVICE_NAME}"
 
