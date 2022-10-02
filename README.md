@@ -232,6 +232,42 @@ class SomeOtherService(miqro.Service):
         )
 ```
 
+#### Authentication and TLS
+
+If a username or a username and a password are required to connect to the broker, set them using the `username` and `password` keys in the `auth` section of the configuration file, e.g.:
+
+
+```yaml
+broker:
+  host: remote-broker.example.com
+  port: 1883
+  keepalive: 60
+
+auth: 
+  username: foo
+  password: bar
+
+```
+
+TLS settings can be defined using the section `tls`:
+
+```yaml
+broker:
+    host: remote-broker.example.com
+    port: 8883
+    keepalive: 60
+
+tls:
+    ca_certs: /path/to/ca.pem
+    certfile: /path/to/client.pem
+    keyfile: /path/to/key.pem
+    cert_reqs: CERT_REQUIRED
+    tls_version: PROTOCOL_TLS
+    ciphers: None
+```
+
+The elements in `tls` are passed to Paho's `tls_set()` (see https://www.eclipse.org/paho/index.php?page=clients/python/docs/index.php#tls_set). For `cert_reqs` and `tls_version`, use the constants defined in the `ssl` module (e.g., `CERT_REQUIRED`).
+
 ### System Service Creation
 
 A MIQRO service can be installed as a linux system service using

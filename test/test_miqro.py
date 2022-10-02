@@ -1,18 +1,20 @@
 import pytest
 import subprocess
 import miqro
+import sys
 
 from threading import Event, Thread
 
 MOSQUITTO_BIN = "mosquitto"
 MOSQUITTO_PORT = "18883"  # avoid collisions with other instance running
 CONFIG_FILE_PATH = "test/miqro.yml"
+CONFIG_FILE_PATH_REMOTE = "test/miqro_remote.yml"
 TIMEOUT = 2
 
 
 @pytest.fixture(scope="module")
 def mqtt_broker():
-    broker = subprocess.Popen([MOSQUITTO_BIN, "-p", MOSQUITTO_PORT, "-v"])
+    broker = subprocess.Popen([MOSQUITTO_BIN, "-p", MOSQUITTO_PORT, "-v"], stdout=sys.stdout, stderr=sys.stderr)
     yield broker
     broker.kill()
     broker.communicate(2)
@@ -28,7 +30,10 @@ def test_connect(mqtt_broker):
 
         def _on_connect(self, *args, **kwargs):
             miqro.Service._on_connect(self, *args, **kwargs)
-            done.set()
+            if self.is_connected:
+                done.set()
+            else:
+                raise Exception("Not connected")
 
     testsvc = TestSvc()
     testsvc.start()
@@ -40,6 +45,31 @@ def test_connect(mqtt_broker):
         testsvc.stop = True
         testsvc.join()
 
+
+def test_connect_remote():
+    done = Event()
+
+    class TestSvc(miqro.Service, Thread):
+        def __init__(self):
+            Thread.__init__(self)
+            miqro.Service.__init__(self, CONFIG_FILE_PATH_REMOTE)
+
+        def _on_connect(self, *args, **kwargs):
+            miqro.Service._on_connect(self, *args, **kwargs)
+            if self.is_connected:
+                done.set()
+            else:
+                raise Exception("Not connected")
+
+    testsvc = TestSvc()
+    testsvc.start()
+
+    try:
+        if not done.wait(TIMEOUT):
+            raise Exception("Test timed out")
+    finally:
+        testsvc.stop = True
+        testsvc.join()
 
 def test_simple_loop(mqtt_broker):
     done = Event()

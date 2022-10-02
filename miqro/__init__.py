@@ -226,6 +226,14 @@ class Service:
         self.last_key_values = {}
 
         self.mqtt_client = mqtt_client_cls(self.SERVICE_NAME)
+        if "auth" in self.config:
+            self.mqtt_client.username_pw_set(
+                **self.config["auth"]
+            )
+        if "tls" in self.config:
+            self.mqtt_client.tls_set(
+                **self._make_tls_config(self.config['tls'])
+            )
         self.mqtt_client.on_connect = self._on_connect
         self.mqtt_client.on_disconnect = self._on_disconnect
         self.mqtt_client.on_message = self._on_message
@@ -248,6 +256,19 @@ class Service:
 
     def __str__(self):
         return self.SERVICE_NAME
+
+    def _make_tls_config(self, config):
+        # cert_reqs and tls_version are strings pointing to properties in 
+        # the ssl module - parse from string to property!
+        import ssl
+        return {
+            "ca_certs": config.get("ca_certs", None),
+            "certfile": config.get("certfile", None),
+            "keyfile": config.get("keyfile", None),
+            "cert_reqs": getattr(ssl, config.get("cert_reqs", "CERT_REQUIRED")),
+            "tls_version": getattr(ssl, config.get("tls_version", "PROTOCOL_TLS")),
+            "ciphers": config.get("ciphers", None),
+        }
 
     def add_loop(self, loop):
         if not self.LOOPS:
@@ -313,6 +334,9 @@ class Service:
         self.willtopic = self.data_topic_prefix + "online"
 
     def _on_connect(self, client, userdata, flags, rc):
+        if rc != 0:
+            self.log.error(f"MQTT connection failed with code {rc}")
+            return
         self.log.info(f"MQTT connected, client={client}, userdata={userdata}, rc={rc}")
         self.is_connected = True
         self.log.info(f"Subscribing to ...")
