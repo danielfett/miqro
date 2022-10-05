@@ -244,10 +244,11 @@ broker:
   keepalive: 60
 
 auth: 
-  username: foo
-  password: bar
+  username: "foo"
+  password: "bar"
 
 ```
+(Note: Quotation marks around configuration values in the YAML file are optional as long as the value does not start with a number.)
 
 TLS settings can be defined using the section `tls`:
 
