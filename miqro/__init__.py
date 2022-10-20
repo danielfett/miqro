@@ -9,6 +9,8 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import paho.mqtt.client as mqtt
 from yaml import FullLoader, dump, load
+from .configuration import load_config_from_yaml, Configuration
+import ssl
 
 
 class Loop:
@@ -203,7 +205,7 @@ class Service:
     QOS_EXACTLY_ONCE = 2
 
     log: logging.Logger
-    config: Dict
+    config: Configuration
     service_config: Dict
     data_topic_prefix: str
     mqtt_client: mqtt.Client
@@ -226,20 +228,30 @@ class Service:
         self.last_key_values = {}
 
         self.mqtt_client = mqtt_client_cls(self.SERVICE_NAME)
-        if "auth" in self.config:
+        if self.config.auth:
             self.mqtt_client.username_pw_set(
-                **self.config["auth"]
+                username=self.config.auth.username,
+                password=self.config.auth.password,
             )
         if "tls" in self.config:
             self.mqtt_client.tls_set(
-                **self._make_tls_config(self.config['tls'])
+                ca_certs=self.config.tls.ca_certs,
+                certfile=self.config.tls.certfile,
+                keyfile=getattr(ssl, self.config.tls.keyfile),
+                cert_reqs=getattr(ssl, self.config.tls.cert_reqs.name),
+                tls_version=self.config.tls.tls_version.name,
+                ciphers=self.config.tls.ciphers,
             )
         self.mqtt_client.on_connect = self._on_connect
         self.mqtt_client.on_disconnect = self._on_disconnect
         self.mqtt_client.on_message = self._on_message
         self.mqtt_client.enable_logger(self.mqtt_log)
         self.mqtt_client.will_set(self.willtopic, "0", retain=True)
-        self.mqtt_client.connect_async(**self.config["broker"])
+        self.mqtt_client.connect_async(
+            self.config.broker.host,
+            self.config.broker.port,
+            self.config.broker.keepalive,
+        )
 
         self.enabled = True
 
@@ -256,19 +268,6 @@ class Service:
 
     def __str__(self):
         return self.SERVICE_NAME
-
-    def _make_tls_config(self, config):
-        # cert_reqs and tls_version are strings pointing to properties in 
-        # the ssl module - parse from string to property!
-        import ssl
-        return {
-            "ca_certs": config.get("ca_certs", None),
-            "certfile": config.get("certfile", None),
-            "keyfile": config.get("keyfile", None),
-            "cert_reqs": getattr(ssl, config.get("cert_reqs", "CERT_REQUIRED")),
-            "tls_version": getattr(ssl, config.get("tls_version", "PROTOCOL_TLS")),
-            "ciphers": config.get("ciphers", None),
-        }
 
     def add_loop(self, loop):
         if not self.LOOPS:
@@ -309,9 +308,8 @@ class Service:
         for path in paths:
             if path.exists():
                 self.log.debug(f"Using configuration file at {path}")
-                with path.open("r") as f:
-                    self.config = load(f, Loader=FullLoader)
-                    break
+                self.config = load_config_from_yaml(path)
+                break
             else:
                 self.log.debug(f"NOT using configuration file at {path}")
         else:
@@ -320,13 +318,13 @@ class Service:
                 + ", ".join(map(str, self.CONFIG_FILE_PATHS))
             )
 
-        if self.SERVICE_NAME not in self.config.get("services", {}):
+        if self.SERVICE_NAME not in self.config.services:
             self.log.warning(
                 f"Service configuration for {self.SERVICE_NAME} not found in 'services' section of configuration file {path}. Using empty configuration."
             )
             self.service_config = {}
         else:
-            self.service_config = self.config["services"][self.SERVICE_NAME]
+            self.service_config = self.config.services[self.SERVICE_NAME]
 
         self.data_topic_prefix = self.service_config.get(
             "data_topic", f"service/{self.SERVICE_NAME}/"
@@ -466,7 +464,11 @@ class Service:
         elif isinstance(only_if_changed, timedelta):
             now = datetime.now()
             last_message, last_time = self.last_key_values.get(topic, (None, None))
-            if last_message == message and last_time and last_time + only_if_changed > now:
+            if (
+                last_message == message
+                and last_time
+                and last_time + only_if_changed > now
+            ):
                 self.log.debug(
                     f"{topic} not changed since {only_if_changed.total_seconds()}s, not publishing."
                 )
