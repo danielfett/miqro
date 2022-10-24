@@ -1,0 +1,17 @@
+broker:
+  host: 6889f4a02fc74c52b756edefc48f418a.s2.eu.hivemq.cloud
+  port: 8883
+  keepalive: 60
+
+tls:
+  cert_reqs: CERT_REQUIRED
+  tls_version: PROTOCOL_TLSv1_2
+
+auth:
+  username: miqro_test
+  password: miqro_test
+
+log_level: DEBUG
+services:
+  test1:
+    nothing_to_see_here: 

@@ -17,7 +17,7 @@ def mqtt_broker():
     broker = subprocess.Popen([MOSQUITTO_BIN, "-p", MOSQUITTO_PORT, "-v"], stdout=sys.stdout, stderr=sys.stderr)
     yield broker
     broker.kill()
-    broker.communicate(2)
+    broker.communicate()
 
 
 def test_connect(mqtt_broker):

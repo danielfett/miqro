@@ -233,13 +233,13 @@ class Service:
                 username=self.config.auth.username,
                 password=self.config.auth.password,
             )
-        if "tls" in self.config:
+        if self.config.tls:
             self.mqtt_client.tls_set(
                 ca_certs=self.config.tls.ca_certs,
                 certfile=self.config.tls.certfile,
-                keyfile=getattr(ssl, self.config.tls.keyfile),
+                keyfile=self.config.tls.keyfile,
                 cert_reqs=getattr(ssl, self.config.tls.cert_reqs.name),
-                tls_version=self.config.tls.tls_version.name,
+                tls_version=getattr(ssl, self.config.tls.tls_version.name),
                 ciphers=self.config.tls.ciphers,
             )
         self.mqtt_client.on_connect = self._on_connect
