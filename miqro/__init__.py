@@ -558,6 +558,9 @@ def run(service):
     parser.add_argument(
         "--install", action="store_true", help="Setup this service as a systemd unit."
     )
+    parser.add_argument(
+        "--install-as-user", "-u", help="Install service for specified user (instead of root)", default="root"
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument(
         "--mqtt-debug-prefix",
@@ -586,6 +589,10 @@ def run(service):
 
     systemd_service_name = f"miqro_{service.SERVICE_NAME}"
 
+    executable = sys.executable
+    if not executable:
+        executable = "/usr/bin/env python3"
+
     systemd_unit_file = f"""
 [Unit]
 Description={service.SERVICE_NAME} MIQRO microservice
@@ -595,8 +602,8 @@ After=network.target
 Type=simple
 Restart=always
 RestartSec=20
-User=root
-ExecStart=/usr/bin/env python3 {filename.resolve()}
+User={cli_args.install_as_user}
+ExecStart={executable} {filename.resolve()}
 
 [Install]
 WantedBy=multi-user.target
