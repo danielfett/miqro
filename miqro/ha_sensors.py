@@ -41,18 +41,29 @@ class Device:
         self.__entities.append(entity)  
 
     def publish_discovery(self, prefix):
-        for entity in self.__entities:
-            entity.publish_discovery(prefix, self._build_discovery_payload())
+        device_payload = {k:v for k,v in self.__dict__.items() if v is not None and not k.startswith('_')}
 
-    def _build_discovery_payload(self):
-        payload = {k:v for k,v in self.__dict__.items() if v is not None and not k.startswith('_')}
-
-        del payload["service"]
+        del device_payload["service"]
 
         if self.via_device is not None:
-            payload["via_device"] = self.via_device._unique_id
+            device_payload["via_device"] = self.via_device._unique_id
 
-        return payload
+        payload = {
+            "device": device_payload,
+            "origin": {"name": f"MIQRO service {self.service.SERVICE_NAME}"},
+            "availability": [{
+                "topic": f"{self.device.service.data_topic_prefix}{self.device.service.willtopic}",
+                "payload_available": "1",
+                "payload_not_available": "0"
+            }],
+            "components": {}
+        }
+
+        for entity in self.__entities:
+            payload["components"][entity.unique_id] = entity.get_discover_payload()
+
+        topic = f"{prefix}/device/{self._unique_id}/config"
+        self.device.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
 
 
 @dataclass
@@ -79,26 +90,12 @@ class Entity:
             self._unique_id = f"{self.device._unique_id}__{self.default_entity_id.replace('.', '_')}"
         self.device.add_entity(self)
 
-    def publish_discovery(self, prefix, device_payload):
-        topic = f"{prefix}/{self._component}/{self._unique_id}/config"
-        payload = self._build_discovery_payload(device_payload)
-        self.device.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
-
-    def _build_discovery_payload(self, device_payload):
+    def get_discover_payload(self):
         payload = {k:v for k,v in self.__dict__.items() if v is not None and not k.startswith('_') and k != 'device'}
         payload["platform"] = self._component
-        payload["device"] = device_payload
         
         payload["state_topic"] = f"{self.device.service.data_topic_prefix}{self.state_topic_postfix}"
         del payload["state_topic_postfix"]
-
-        payload["availability"] = [{
-            "topic": f"{self.device.service.data_topic_prefix}{self.device.service.willtopic}",
-            "payload_available": "1",
-            "payload_not_available": "0"
-        }]
-
-
         return payload
 
 @dataclass
