@@ -10,6 +10,8 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import paho.mqtt.client as mqtt
 from yaml import FullLoader, dump, load
 
+from miqro import ha_sensors
+
 
 class Loop:
     fn: Callable
@@ -196,6 +198,11 @@ class Service:
     CLASS_MQTT_GLOBAL_HANDLERS: List[Tuple[str, Callable]] = []
     MQTT_ONLINE_UPDATE_INTERVAL: int = 180
 
+    PAYLOAD_ON = 1
+    PAYLOAD_OFF = 0
+
+    ha_devices: List[ha_sensors.Device] = []
+
     USE_STATE_FILE = False
 
     QOS_MAX_ONCE = 0
@@ -257,6 +264,7 @@ class Service:
     def __str__(self):
         return self.SERVICE_NAME
 
+    
     def _make_tls_config(self, config):
         # cert_reqs and tls_version are strings pointing to properties in 
         # the ssl module - parse from string to property!
@@ -347,6 +355,17 @@ class Service:
 
         self.mqtt_client.publish(self.willtopic, "1", retain=True)
 
+        self._publish_ha_discovery()
+
+    def _publish_ha_discovery(self):
+        if "ha_discovery_prefix" in self.config:
+            prefix = self.config["ha_discovery_prefix"]
+        else:
+            prefix = "homeassistant"
+
+        for device in self.ha_devices:
+            device.publish_discovery(prefix)
+
     def _on_disconnect(self, client, userdata, rc):
         self.log.warning(f"MQTT disconnected, rc={rc}")
         self.is_connected = False
@@ -436,18 +455,21 @@ class Service:
 
     def publish(
         self,
-        ext,
+        ext: str | ha_sensors.Entity,
         message,
         retain=False,
         qos=QOS_MAX_ONCE,
         only_if_changed: Union[bool, timedelta] = False,
         global_=False,
     ):
+        if isinstance(ext, ha_sensors.Entity):
+            ext = ext.state_topic_postfix
+
         topic = (self.data_topic_prefix + ext) if not global_ else ext
         # if ext not in self.ignore_recv_topics:
         #    self.ignore_recv_topics.append(ext)
         if type(message) == type(True):  # type is boolean
-            message = 1 if message else 0
+            message = self.PAYLOAD_ON if message else self.PAYLOAD_OFF
         elif message is None:
             message = ""
         elif type(message) in [dict, list]:
