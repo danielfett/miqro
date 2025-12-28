@@ -462,14 +462,19 @@ class Service:
         only_if_changed: Union[bool, timedelta] = False,
         global_=False,
     ):
+        ha_sensor = None
         if isinstance(ext, ha_sensors.Entity):
+            ha_sensor = ext
             ext = ext.state_topic_postfix
 
         topic = (self.data_topic_prefix + ext) if not global_ else ext
         # if ext not in self.ignore_recv_topics:
         #    self.ignore_recv_topics.append(ext)
         if type(message) == type(True):  # type is boolean
-            message = self.PAYLOAD_ON if message else self.PAYLOAD_OFF
+            if ha_sensor is None or not isinstance(ha_sensor, ha_sensors.Switch) :
+                message = self.PAYLOAD_ON if message else self.PAYLOAD_OFF
+            else:
+                message = ha_sensor.payload_on if message else ha_sensor.payload_off
         elif message is None:
             message = ""
         elif type(message) in [dict, list]:

@@ -27,7 +27,8 @@ class SensorDemoService(miqro.Service):
             ha_device_one,
             "Hello Switch",
             state_topic_postfix="hello/switch/state",
-            command_topic_postfix="hello/switch/command"
+            command_topic_postfix="hello/switch/command",
+            optimistic=True
         )
 
         self.text_demo = miqro.ha_sensors.Text(
@@ -55,8 +56,9 @@ class SensorDemoService(miqro.Service):
         # The result is the same.
         self.publish("hello/binary", True)
         self.publish("hello/sensor", "one")
-        self.publish("hello/switch/state", True)
-        sleep(0.5)
+        # self.publish("hello/switch/state", True) this doesn't work; remember to use the proper payload when using this format
+        self.publish("hello/switch/state", "on")
+        sleep(2)
         self.publish(self.binary_sensor_demo, False)
         self.publish(self.general_sensor_demo, "two")
         self.publish(self.switch_demo, False)
@@ -72,7 +74,7 @@ class SensorDemoService(miqro.Service):
     def handle_switch_command(self, payload):
         self.log.info("Received switch update: " + payload)
 
-    def handle_number_command(self, payload):
+    def handle_number_command(self, _, payload):
         self.log.info("Received number command: " + payload)
 
 

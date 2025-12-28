@@ -52,7 +52,7 @@ class Device:
             "device": device_payload,
             "origin": {"name": f"MIQRO service {self.service.SERVICE_NAME}"},
             "availability": [{
-                "topic": f"{self.device.service.data_topic_prefix}{self.device.service.willtopic}",
+                "topic": self.service.willtopic,
                 "payload_available": "1",
                 "payload_not_available": "0"
             }],
@@ -62,8 +62,10 @@ class Device:
         for entity in self.__entities:
             payload["components"][entity.unique_id] = entity.get_discover_payload()
 
+        print (payload)
+            
         topic = f"{prefix}/device/{self._unique_id}/config"
-        self.device.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
+        self.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
 
 
 @dataclass
@@ -87,7 +89,7 @@ class Entity:
         if self.default_entity_id is None:
             self.default_entity_id = f"{self._component}.{self.state_topic_postfix.replace('/', '_')}"
         if self.unique_id is None:
-            self._unique_id = f"{self.device._unique_id}__{self.default_entity_id.replace('.', '_')}"
+            self.unique_id = f"{self.device._unique_id}__{self.default_entity_id.replace('.', '_')}"
         self.device.add_entity(self)
 
     def get_discover_payload(self):
@@ -111,11 +113,11 @@ class EntityWithCommand(Entity):
             self.device.service.add_handler(self.command_topic_postfix, self.callback)
 
 
-    def _build_discovery_payload(self, device_payload=None):
-        payload = super()._build_discovery_payload(device_payload)
+    def get_discover_payload(self):
+        payload = super().get_discover_payload()
         payload["command_topic"] = f"{self.device.service.data_topic_prefix}{self.command_topic_postfix}"
         del payload["command_topic_postfix"]
-        if self.callback is not None:
+        if "callback" in payload:
             del payload["callback"]
         return payload
 
@@ -131,9 +133,9 @@ class BinarySensor(Entity):
         super().__post_init__()
 
         if self.payload_on is None:
-            self.payload_on = self.device.service.PAYLOAD_ON
+            self.payload_on = str(self.device.service.PAYLOAD_ON)
         if self.payload_off is None:
-            self.payload_off = self.device.service.PAYLOAD_OFF
+            self.payload_off = str(self.device.service.PAYLOAD_OFF)
 
 @dataclass
 class Sensor(Entity):
