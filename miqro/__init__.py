@@ -585,13 +585,18 @@ def run(service):
         ).run()
         return
 
-    filename = Path(sys.argv[0])
-
     systemd_service_name = f"miqro_{service.SERVICE_NAME}"
 
     executable = sys.executable
     if not executable:
         executable = "/usr/bin/env python3"
+
+    # Check if the service was started with 'python -m module'
+    main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    if main_spec and main_spec.name and main_spec.name != "__main__":
+        exec_start = f"{executable} -m {main_spec.name}"
+    else:
+        exec_start = f"{executable} {Path(sys.argv[0]).resolve()}"
 
     systemd_unit_file = f"""
 [Unit]
@@ -603,7 +608,7 @@ Type=simple
 Restart=always
 RestartSec=20
 User={cli_args.install_as_user}
-ExecStart={executable} {filename.resolve()}
+ExecStart={exec_start}
 
 [Install]
 WantedBy=multi-user.target
