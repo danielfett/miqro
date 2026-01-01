@@ -31,6 +31,11 @@ class Device:
         self._unique_id = f"{self.service.SERVICE_NAME}_{clean_string(self.name)}"
         if self.identifiers is None:
             self.identifiers = [self._unique_id]
+        else:
+            if isinstance(self.identifiers, str):
+                self.identifiers = [self.identifiers]
+            if self._unique_id not in self.identifiers:
+                self.identifiers.append(self._unique_id)
 
 
     @property
@@ -61,18 +66,15 @@ class Device:
 
         for entity in self.__entities:
             payload["components"][entity.unique_id] = entity.get_discover_payload()
-
-        print (payload)
             
         topic = f"{prefix}/device/{self._unique_id}/config"
         self.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
 
 
 @dataclass
-class Entity:
-    device: Device
+class EntityWithoutStateTopic:
+    device: Device | None
     name: str
-    state_topic_postfix: str
     display_name: str | None = None
     device_class: str | None = None
     enabled_by_default: bool | None = None
@@ -83,43 +85,88 @@ class Entity:
     default_entity_id: str | None = None
     qos: int | None = None
     unique_id: str | None = None
+    service: "miqro.Service | None" = None
+
+    json_attributes_topic_postfix: str | None = None
+    json_attributes_template: str | None = None
 
 
     def __post_init__(self):
+        # device OR service may be used, but not both
+        if self.device is None and self.service is None:
+            raise ValueError("Either device or service must be set for an entity")
+        if self.device is not None and self.service is not None:
+            raise ValueError("Only one of device or service may be set for an entity")
+
+        
         if self.default_entity_id is None:
-            self.default_entity_id = f"{self._component}.{self.state_topic_postfix.replace('/', '_')}"
+            self.default_entity_id = f"{self._component}.{clean_string(self.name)}"
         if self.unique_id is None:
-            self.unique_id = f"{self.device._unique_id}__{self.default_entity_id.replace('.', '_')}"
-        self.device.add_entity(self)
+            if self.device is not None:
+                self.unique_id = f"{self.device._unique_id}__{self.default_entity_id.replace('.', '_')}"
+            else:
+                self.unique_id = f"{clean_string(self.service.SERVICE_NAME)}__{self.default_entity_id.replace('.', '_')}"
+
+        # iterate through all attributes and find any callback functions,
+        # x_topic_prefix uses the corresponding x_callback function
+        for attr_name in dir(self):
+            if attr_name.endswith("_topic_postfix"):
+                callback_attr_name = attr_name[:-14] + "_callback"
+                topic_postfix = getattr(self, attr_name)
+                callback = getattr(self, callback_attr_name, None)
+                if callback is not None:
+                    self.device.service.add_handler(topic_postfix, callback)
+
+        if self.device is not None:
+            self.device.add_entity(self)
+        else:
+            self.service.ha_entities.append(self)
 
     def get_discover_payload(self):
-        payload = {k:v for k,v in self.__dict__.items() if v is not None and not k.startswith('_') and k != 'device'}
+        payload = {k:v for k,v in self.__dict__.items() if v is not None and not k.startswith('_') and k != 'device' and k != 'service'}
         payload["platform"] = self._component
+
+        # delete x_callback entries from payload
+        for attr_name in dir(self):
+            if attr_name.endswith("_callback"):
+                if attr_name in payload:
+                    del payload[attr_name]
+
+        service = self.device.service if self.device is not None else self.service
+        for key, value in list(payload.items()):
+            if key.endswith('_postfix'):
+                full_key = key[:-8]
+                payload[full_key] = f"{service.data_topic_prefix}{value}"
+                del payload[key]
         
-        payload["state_topic"] = f"{self.device.service.data_topic_prefix}{self.state_topic_postfix}"
-        del payload["state_topic_postfix"]
         return payload
 
+    def publish_discovery(self, prefix):
+        # only if device is none
+        if self.device is not None:
+            raise ValueError("publish_discovery can only be called for entities without device")
+
+        payload = self.get_discover_payload()
+        topic = f"{prefix}/{self._component}/{self.unique_id}/config"
+        self.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
+
 @dataclass
-class EntityWithCommand(Entity):
-    command_topic_postfix: str = ""
-    callback: "callable | None" = None
+class Entity(EntityWithoutStateTopic):
+    state_topic_postfix: str = ""
+    value_template: str | None = None
 
     def __post_init__(self):
         super().__post_init__()
-        if self.command_topic_postfix == "":
-            raise ValueError("command_topic_postfix must be set")
-        if self.callback is not None:
-            self.device.service.add_handler(self.command_topic_postfix, self.callback)
+        if self.state_topic_postfix == "":
+            raise ValueError("state_topic_postfix must be set")
+        if self.default_entity_id is None:
+            self.default_entity_id = f"{self._component}.{self.state_topic_postfix.replace('/', '_')}"
+            
+        super().__post_init__()
 
-
-    def get_discover_payload(self):
-        payload = super().get_discover_payload()
-        payload["command_topic"] = f"{self.device.service.data_topic_prefix}{self.command_topic_postfix}"
-        del payload["command_topic_postfix"]
-        if "callback" in payload:
-            del payload["callback"]
-        return payload
+@dataclass
+class EntityWithCommandTopics(Entity):
+    optimistic: bool | None = None
 
 
 @dataclass
@@ -132,17 +179,18 @@ class BinarySensor(Entity):
     def __post_init__(self):
         super().__post_init__()
 
+        service = self.device.service if self.device is not None else self.service
+
         if self.payload_on is None:
-            self.payload_on = str(self.device.service.PAYLOAD_ON)
+            self.payload_on = str(service.PAYLOAD_ON)
         if self.payload_off is None:
-            self.payload_off = str(self.device.service.PAYLOAD_OFF)
+            self.payload_off = str(service.PAYLOAD_OFF)
 
 @dataclass
 class Sensor(Entity):
     _component: str = "sensor"
     unit_of_measurement: str | None = None
     state_class: str | None = None
-    value_template: str | None = None
     last_reset_value_template: str | None = None
     suggested_display_precision: int | None = None
     options: list | None = None
@@ -154,9 +202,10 @@ class Sensor(Entity):
             self.device_class = "enum"
 
 @dataclass
-class Switch(EntityWithCommand):
+class Switch(EntityWithCommandTopics):
     _component: str = "switch"
-    optimistic: bool | None = None
+    command_topic_postfix: str = ""
+    command_callback: "callable | None" = None
     payload_off: str = "off"
     payload_on: str = "on"
 
@@ -170,8 +219,10 @@ class Switch(EntityWithCommand):
 
 
 @dataclass
-class Text(EntityWithCommand):
+class Text(EntityWithCommandTopics):
     _component: str = "text"
+    command_topic_postfix: str = ""
+    command_callback: "callable | None" = None
     max: int = 255
     min: int = 0
     mode: str | None = "text"
@@ -180,14 +231,138 @@ class Text(EntityWithCommand):
 
 
 @dataclass
-class Number(EntityWithCommand):
+class Number(EntityWithCommandTopics):
     _component: str = "number"
+    command_topic_postfix: str = ""
+    command_callback: "callable | None" = None
     max: float | int = 100
     min: float | int = 1
     mode: str | None = None
-    optimistic: bool | None = None
     payload_reset: str | None = None
     retain: bool | None = None
     step: float | None = None
     unit_of_measurement: str | None = None
 
+
+@dataclass
+class Select(EntityWithCommandTopics):
+    _component: str = "select"
+    command_topic_postfix: str = ""
+    command_callback: "callable | None" = None
+    retain: bool | None = None
+    options: list = field(default_factory=list)
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        if not self.options:
+            raise ValueError("options must be set for select entity")
+
+
+@dataclass
+class Button(EntityWithoutStateTopic):
+    _component: str = "button"
+    optimistic: bool | None = None
+    command_topic_postfix: str = ""
+    command_callback: "callable | None" = None
+    payload_press: str = "PRESS"
+    retain: bool | None = None
+
+
+@dataclass
+class ClimateController(EntityWithCommandTopics):
+    _component = "climate"
+    current_humidity_template: str | None = None
+    current_humidity_topic_postfix: str | None = None
+
+    current_temperature_template: str | None = None
+    current_temperature_topic_postfix: str | None = None
+
+    fan_mode_command_template: str | None = None
+    fan_mode_command_topic_postfix: str | None = None
+    fan_mode_command_callback: "callable | None" = None
+    fan_mode_state_topic_postfix: str | None = None
+    fan_mode_state_template: str | None = None
+    fan_modes: list | None = None
+
+    initial: float | None = None  # initial target temperature
+
+    max_humidity: float | None = None
+    max_temp: float | None = None
+    min_humidity: float | None = None
+    min_temp: float | None = None
+
+    mode_command_template: str | None = None
+    mode_command_topic_postfix: str | None = None
+    mode_state_template: str | None = None
+    mode_state_topic_postfix: str | None = None
+    modes: list | None = None
+
+    payload_on: str | None = None
+    payload_off: str | None = None
+    power_command_callback: "callable | None" = None
+    power_command_topic_postfix: str | None = None
+    power_command_template: str | None = None
+
+    precision: str | None = None
+
+    preset_mode_command_template: str | None = None
+    preset_mode_command_topic_postfix: str | None = None
+    preset_mode_command_callback: "callable | None" = None
+    preset_mode_state_template: str | None = None
+    preset_mode_state_topic_postfix: str | None = None
+    preset_modes: list | None = None
+
+    swing_horizontal_mode_command_template: str | None = None
+    swing_horizontal_mode_command_topic_postfix: str | None = None
+    swing_horizontal_mode_command_callback: "callable | None" = None
+    swing_horizontal_mode_state_template: str | None = None
+    swing_horizontal_mode_state_topic_postfix: str | None = None
+    swing_horizontal_modes: list | None = None
+
+    swing_mode_command_template: str | None = None
+    swing_mode_command_topic_postfix: str | None = None
+    swing_mode_command_callback: "callable | None" = None
+    swing_mode_state_template: str | None = None
+    swing_mode_state_topic_postfix: str | None = None
+    swing_modes: list | None = None
+
+    target_humidity_command_template: str | None = None
+    target_humidity_command_topic_postfix: str | None = None
+    target_humidity_command_callback: "callable | None" = None
+    target_humidity_state_template: str | None = None
+    target_humidity_state_topic_postfix: str | None = None
+
+    temperature_command_topic_postfix: str | None = None
+    temperature_command_template: str | None = None
+    temperature_command_callback: "callable | None" = None
+    temperature_state_template: str | None = None
+    temperature_state_topic_postfix: str | None = None
+
+    temperature_high_command_topic_postfix: str | None = None
+    temperature_high_command_template: str | None = None
+    temperature_high_command_callback: "callable | None" = None
+    temperature_high_state_template: str | None = None
+    temperature_high_state_topic_postfix: str | None = None
+
+    temperature_low_command_topic_postfix: str | None = None
+    temperature_low_command_template: str | None = None
+    temperature_low_command_callback: "callable | None" = None
+    temperature_low_state_template: str | None = None
+    temperature_low_state_topic_postfix: str | None = None
+
+    temperature_unit: str | None = None
+    temp_step: float | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # precision must be one of '0.1', '0.5', '1.0'
+        if self.precision is not None:
+            if self.precision not in ['0.1', '0.5', '1.0']:
+                raise ValueError("precision must be one of '0.1', '0.5', '1.0'")
+
+        # temperature unit must be C or F
+        if self.temperature_unit is not None:
+            if self.temperature_unit not in ['C', 'F']:
+                raise ValueError("temperature_unit must be 'C' or 'F'")

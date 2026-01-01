@@ -202,6 +202,7 @@ class Service:
     PAYLOAD_OFF = 0
 
     ha_devices: List[ha_sensors.Device] = []
+    ha_entities: List[ha_sensors.Entity] = []  # only entities without device
 
     USE_STATE_FILE = False
 
@@ -365,6 +366,8 @@ class Service:
 
         for device in self.ha_devices:
             device.publish_discovery(prefix)
+        for entity in self.ha_entities:
+            entity.publish_discovery(prefix)
 
     def _on_disconnect(self, client, userdata, rc):
         self.log.warning(f"MQTT disconnected, rc={rc}")
