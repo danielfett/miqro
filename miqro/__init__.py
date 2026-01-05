@@ -235,13 +235,9 @@ class Service:
 
         self.mqtt_client = mqtt_client_cls(self.SERVICE_NAME)
         if "auth" in self.config:
-            self.mqtt_client.username_pw_set(
-                **self.config["auth"]
-            )
+            self.mqtt_client.username_pw_set(**self.config["auth"])
         if "tls" in self.config:
-            self.mqtt_client.tls_set(
-                **self._make_tls_config(self.config['tls'])
-            )
+            self.mqtt_client.tls_set(**self._make_tls_config(self.config["tls"]))
         self.mqtt_client.on_connect = self._on_connect
         self.mqtt_client.on_disconnect = self._on_disconnect
         self.mqtt_client.on_message = self._on_message
@@ -265,11 +261,11 @@ class Service:
     def __str__(self):
         return self.SERVICE_NAME
 
-    
     def _make_tls_config(self, config):
-        # cert_reqs and tls_version are strings pointing to properties in 
+        # cert_reqs and tls_version are strings pointing to properties in
         # the ssl module - parse from string to property!
         import ssl
+
         return {
             "ca_certs": config.get("ca_certs", None),
             "certfile": config.get("certfile", None),
@@ -474,7 +470,7 @@ class Service:
         # if ext not in self.ignore_recv_topics:
         #    self.ignore_recv_topics.append(ext)
         if type(message) == type(True):  # type is boolean
-            if ha_sensor is None or not isinstance(ha_sensor, ha_sensors.Switch) :
+            if ha_sensor is None or not isinstance(ha_sensor, ha_sensors.Switch):
                 message = self.PAYLOAD_ON if message else self.PAYLOAD_OFF
             else:
                 message = ha_sensor.payload_on if message else ha_sensor.payload_off
@@ -496,7 +492,11 @@ class Service:
         elif isinstance(only_if_changed, timedelta):
             now = datetime.now()
             last_message, last_time = self.last_key_values.get(topic, (None, None))
-            if last_message == message and last_time and last_time + only_if_changed > now:
+            if (
+                last_message == message
+                and last_time
+                and last_time + only_if_changed > now
+            ):
                 self.log.debug(
                     f"{topic} not changed since {only_if_changed.total_seconds()}s, not publishing."
                 )
@@ -589,7 +589,10 @@ def run(service):
         "--install", action="store_true", help="Setup this service as a systemd unit."
     )
     parser.add_argument(
-        "--install-as-user", "-u", help="Install service for specified user (instead of root)", default="root"
+        "--install-as-user",
+        "-u",
+        help="Install service for specified user (instead of root)",
+        default="root",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument(

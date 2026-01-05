@@ -14,7 +14,11 @@ TIMEOUT = 2
 
 @pytest.fixture(scope="module")
 def mqtt_broker():
-    broker = subprocess.Popen([MOSQUITTO_BIN, "-p", MOSQUITTO_PORT, "-v"], stdout=sys.stdout, stderr=sys.stderr)
+    broker = subprocess.Popen(
+        [MOSQUITTO_BIN, "-p", MOSQUITTO_PORT, "-v"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
     yield broker
     broker.kill()
     broker.communicate(2)
@@ -70,6 +74,7 @@ def test_connect_remote():
     finally:
         testsvc.stop = True
         testsvc.join()
+
 
 def test_simple_loop(mqtt_broker):
     done = Event()

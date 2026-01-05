@@ -9,6 +9,7 @@ def clean_string(raw: str) -> str:
     result = re.sub(r"[^A-Za-z0-9_-]", "-", raw)
     return result.strip("-")
 
+
 @dataclass
 class Device:
     service: "miqro.Service"
@@ -37,16 +38,19 @@ class Device:
             if self._unique_id not in self.identifiers:
                 self.identifiers.append(self._unique_id)
 
-
     @property
     def entities(self):
         return self.__entities
 
     def add_entity(self, entity):
-        self.__entities.append(entity)  
+        self.__entities.append(entity)
 
     def publish_discovery(self, prefix):
-        device_payload = {k:v for k,v in self.__dict__.items() if v is not None and not k.startswith('_')}
+        device_payload = {
+            k: v
+            for k, v in self.__dict__.items()
+            if v is not None and not k.startswith("_")
+        }
 
         del device_payload["service"]
 
@@ -56,17 +60,19 @@ class Device:
         payload = {
             "device": device_payload,
             "origin": {"name": f"MIQRO service {self.service.SERVICE_NAME}"},
-            "availability": [{
-                "topic": self.service.willtopic,
-                "payload_available": "1",
-                "payload_not_available": "0"
-            }],
-            "components": {}
+            "availability": [
+                {
+                    "topic": self.service.willtopic,
+                    "payload_available": "1",
+                    "payload_not_available": "0",
+                }
+            ],
+            "components": {},
         }
 
         for entity in self.__entities:
             payload["components"][entity.unique_id] = entity.get_discover_payload()
-            
+
         topic = f"{prefix}/device/{self._unique_id}/config"
         self.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
 
@@ -90,7 +96,6 @@ class EntityWithoutStateTopic:
     json_attributes_topic_postfix: str | None = None
     json_attributes_template: str | None = None
 
-
     def __post_init__(self):
         # device OR service may be used, but not both
         if self.device is None and self.service is None:
@@ -98,7 +103,6 @@ class EntityWithoutStateTopic:
         if self.device is not None and self.service is not None:
             raise ValueError("Only one of device or service may be set for an entity")
 
-        
         if self.default_entity_id is None:
             self.default_entity_id = f"{self._component}.{clean_string(self.name)}"
         if self.unique_id is None:
@@ -123,7 +127,14 @@ class EntityWithoutStateTopic:
             self.service.ha_entities.append(self)
 
     def get_discover_payload(self):
-        payload = {k:v for k,v in self.__dict__.items() if v is not None and not k.startswith('_') and k != 'device' and k != 'service'}
+        payload = {
+            k: v
+            for k, v in self.__dict__.items()
+            if v is not None
+            and not k.startswith("_")
+            and k != "device"
+            and k != "service"
+        }
         payload["platform"] = self._component
 
         # delete x_callback entries from payload
@@ -134,21 +145,24 @@ class EntityWithoutStateTopic:
 
         service = self.device.service if self.device is not None else self.service
         for key, value in list(payload.items()):
-            if key.endswith('_postfix'):
+            if key.endswith("_postfix"):
                 full_key = key[:-8]
                 payload[full_key] = f"{service.data_topic_prefix}{value}"
                 del payload[key]
-        
+
         return payload
 
     def publish_discovery(self, prefix):
         # only if device is none
         if self.device is not None:
-            raise ValueError("publish_discovery can only be called for entities without device")
+            raise ValueError(
+                "publish_discovery can only be called for entities without device"
+            )
 
         payload = self.get_discover_payload()
         topic = f"{prefix}/{self._component}/{self.unique_id}/config"
         self.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
+
 
 @dataclass
 class Entity(EntityWithoutStateTopic):
@@ -160,13 +174,23 @@ class Entity(EntityWithoutStateTopic):
         if self.state_topic_postfix == "":
             raise ValueError("state_topic_postfix must be set")
         if self.default_entity_id is None:
-            self.default_entity_id = f"{self._component}.{self.state_topic_postfix.replace('/', '_')}"
-            
+            self.default_entity_id = (
+                f"{self._component}.{self.state_topic_postfix.replace('/', '_')}"
+            )
+
         super().__post_init__()
 
+
 @dataclass
-class EntityWithCommandTopics(Entity):
-    optimistic: bool | None = None
+class Event(Entity):
+    _component: str = "event"
+    event_types: list | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        if self.event_type is None:
+            self.event_type = self.state_topic_postfix.replace("/", "_")
 
 
 @dataclass
@@ -186,6 +210,7 @@ class BinarySensor(Entity):
         if self.payload_off is None:
             self.payload_off = str(service.PAYLOAD_OFF)
 
+
 @dataclass
 class Sensor(Entity):
     _component: str = "sensor"
@@ -201,9 +226,11 @@ class Sensor(Entity):
         if self.options is not None:
             self.device_class = "enum"
 
+
 @dataclass
-class Switch(EntityWithCommandTopics):
+class Switch(Entity):
     _component: str = "switch"
+    optimistic: bool | None = None
     command_topic_postfix: str = ""
     command_callback: "callable | None" = None
     payload_off: str = "off"
@@ -219,8 +246,9 @@ class Switch(EntityWithCommandTopics):
 
 
 @dataclass
-class Text(EntityWithCommandTopics):
+class Text(Entity):
     _component: str = "text"
+    optimistic: bool | None = None
     command_topic_postfix: str = ""
     command_callback: "callable | None" = None
     max: int = 255
@@ -231,8 +259,9 @@ class Text(EntityWithCommandTopics):
 
 
 @dataclass
-class Number(EntityWithCommandTopics):
+class Number(Entity):
     _component: str = "number"
+    optimistic: bool | None = None
     command_topic_postfix: str = ""
     command_callback: "callable | None" = None
     max: float | int = 100
@@ -245,8 +274,9 @@ class Number(EntityWithCommandTopics):
 
 
 @dataclass
-class Select(EntityWithCommandTopics):
+class Select(Entity):
     _component: str = "select"
+    optimistic: bool | None = None
     command_topic_postfix: str = ""
     command_callback: "callable | None" = None
     retain: bool | None = None
@@ -270,8 +300,9 @@ class Button(EntityWithoutStateTopic):
 
 
 @dataclass
-class ClimateController(EntityWithCommandTopics):
+class ClimateController(EntityWithoutStateTopic):
     _component = "climate"
+    optimistic: bool | None = None
     current_humidity_template: str | None = None
     current_humidity_topic_postfix: str | None = None
 
@@ -359,10 +390,17 @@ class ClimateController(EntityWithCommandTopics):
 
         # precision must be one of '0.1', '0.5', '1.0'
         if self.precision is not None:
-            if self.precision not in ['0.1', '0.5', '1.0']:
+            if self.precision not in ["0.1", "0.5", "1.0"]:
                 raise ValueError("precision must be one of '0.1', '0.5', '1.0'")
 
         # temperature unit must be C or F
         if self.temperature_unit is not None:
-            if self.temperature_unit not in ['C', 'F']:
+            if self.temperature_unit not in ["C", "F"]:
                 raise ValueError("temperature_unit must be 'C' or 'F'")
+
+
+@dataclass
+class DeviceTracker(EntityWithoutStateTopic):
+    _component = "device_tracker"
+    json_attributes_topic_postfix: str | None = None
+    json_attributes_template: str | None = None

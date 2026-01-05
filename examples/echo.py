@@ -7,7 +7,10 @@ class EchoSvc(miqro.Service):
     @miqro.loop(seconds=10)
     def do_something(self):
         self.publish("foo", "bar")
-        self.publish_json("foofoo", {"answer": 42.01, "config_demo": self.service_config['custom_value']})
+        self.publish_json(
+            "foofoo",
+            {"answer": 42.01, "config_demo": self.service_config["custom_value"]},
+        )
 
     @miqro.handle("echo")
     def echo(self, payload):

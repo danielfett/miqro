@@ -4,7 +4,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="miqro", # Replace with your own username
+    name="miqro",  # Replace with your own username
     version="1.2.1",
     author="Daniel Fett",
     author_email="miqro@danielfett.de",
@@ -19,8 +19,8 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     install_requires=[
-        'paho.mqtt',
-        'pyyaml',
+        "paho.mqtt",
+        "pyyaml",
     ],
-    python_requires='>=3.6',
+    python_requires=">=3.6",
 )

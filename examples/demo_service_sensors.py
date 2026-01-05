@@ -1,6 +1,7 @@
 import miqro
 from time import sleep
 
+
 class SensorDemoService(miqro.Service):
     SERVICE_NAME = "echo"
 
@@ -9,20 +10,27 @@ class SensorDemoService(miqro.Service):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        ha_device_one = miqro.ha_sensors.Device(self, "Demo Device Miqro One", sw_version="demo-0.1")
-        ha_device_two = miqro.ha_sensors.Device(self, "Demo Device Miqro Two", sw_version="demo-0.1", via_device=ha_device_one)
+        ha_device_one = miqro.ha_sensors.Device(
+            self, "Demo Device Miqro One", sw_version="demo-0.1"
+        )
+        ha_device_two = miqro.ha_sensors.Device(
+            self,
+            "Demo Device Miqro Two",
+            sw_version="demo-0.1",
+            via_device=ha_device_one,
+        )
 
         self.binary_sensor_demo = miqro.ha_sensors.BinarySensor(
             ha_device_one,
             "Beispiel für Binärsensor",
-            state_topic_postfix="hello/binary"
+            state_topic_postfix="hello/binary",
         )
 
         self.general_sensor_demo = miqro.ha_sensors.Sensor(
             ha_device_two,
             "Hello Sensor",
             state_topic_postfix="hello/sensor",
-            options = ["one", "two", "three"]
+            options=["one", "two", "three"],
         )
 
         self.switch_demo = miqro.ha_sensors.Switch(
@@ -30,7 +38,7 @@ class SensorDemoService(miqro.Service):
             "Hello Switch",
             state_topic_postfix="hello/switch/state",
             command_topic_postfix="hello/switch/command",
-            optimistic=True
+            optimistic=True,
         )
 
         self.text_demo = miqro.ha_sensors.Text(
@@ -38,7 +46,7 @@ class SensorDemoService(miqro.Service):
             "Hello Text",
             state_topic_postfix="hello/text/state",
             command_topic_postfix="hello/text/command",
-            pattern = "^[0-9][a-c]$"
+            pattern="^[0-9][a-c]$",
         )
 
         self.number_demo = miqro.ha_sensors.Number(
@@ -46,8 +54,8 @@ class SensorDemoService(miqro.Service):
             "Hello Number",
             state_topic_postfix="hello/number/state",
             command_topic_postfix="hello/number/command",
-            step = 3,
-            command_callback=self.handle_number_command
+            step=3,
+            command_callback=self.handle_number_command,
         )
 
         # Demo for entity without device
@@ -55,7 +63,7 @@ class SensorDemoService(miqro.Service):
             None,
             "No Device Sensor",
             state_topic_postfix="hello/no_device/sensor",
-            service=self
+            service=self,
         )
         # publish needs to be called manually for entities without device
         self.sensor_no_device.publish_discovery("homeassistant")
@@ -77,7 +85,7 @@ class SensorDemoService(miqro.Service):
 
         self.demo_counter += 1
         self.publish(self.sensor_no_device, self.demo_counter)
-        
+
     # Register a callback for a topic that is a sensor's command_topic
     # This is the "old" way of doing things, the newer alternative
     # is to use a callback function.
@@ -91,8 +99,6 @@ class SensorDemoService(miqro.Service):
 
     def handle_number_command(self, _, payload):
         self.log.info("Received number command: " + payload)
-
-
 
 
 demosvc = SensorDemoService(add_config_file_path="examples/miqro.yml")
