@@ -188,10 +188,7 @@ class Event(Entity):
 
     def __post_init__(self):
         super().__post_init__()
-
-        if self.event_type is None:
-            self.event_type = self.state_topic_postfix.replace("/", "_")
-
+        
 
 @dataclass
 class BinarySensor(Entity):

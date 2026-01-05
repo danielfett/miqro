@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="miqro",  # Replace with your own username
-    version="1.2.2",
+    version="1.2.3",
     author="Daniel Fett",
     author_email="miqro@danielfett.de",
     description="MIQRO is an MQTT Micro-Service Library for Python",

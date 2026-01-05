@@ -65,6 +65,13 @@ class SensorDemoService(miqro.Service):
             state_topic_postfix="hello/no_device/sensor",
             service=self,
         )
+
+        self.event = miqro.ha_sensors.Event(
+            ha_device_one,
+            "Hello Event",
+            state_topic_postfix="hello/event/state",
+            event_types=["start", "stop", "pause"],
+        )
         # publish needs to be called manually for entities without device
         self.sensor_no_device.publish_discovery("homeassistant")
 
@@ -78,10 +85,12 @@ class SensorDemoService(miqro.Service):
         self.publish("hello/sensor", "one")
         # self.publish("hello/switch/state", True) this doesn't work; remember to use the proper payload when using this format
         self.publish("hello/switch/state", "on")
+        self.publish_json("hello/event/state", {"event_type": "start", "extra_info": "demo"})
         sleep(2)
         self.publish(self.binary_sensor_demo, False)
         self.publish(self.general_sensor_demo, "two")
         self.publish(self.switch_demo, False)
+        self.publish_json(self.event, {"event_type": "stop", "extra_info": "another demo"})
 
         self.demo_counter += 1
         self.publish(self.sensor_no_device, self.demo_counter)
