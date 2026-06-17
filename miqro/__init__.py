@@ -200,8 +200,8 @@ class Service:
     CLASS_MQTT_GLOBAL_HANDLERS: List[Tuple[str, Callable]] = []
     MQTT_ONLINE_UPDATE_INTERVAL: int = 180
 
-    PAYLOAD_ON = 1
-    PAYLOAD_OFF = 0
+    PAYLOAD_ON = "1"
+    PAYLOAD_OFF = "0"
 
     ha_devices: List[ha_sensors.Device] = []
     ha_entities: List[ha_sensors.Entity] = []  # only entities without device
@@ -403,11 +403,11 @@ class Service:
 
         assert self.LOOPS
 
-        self.log.info("Loop stats:")
+        self.log.debug("Loop stats:")
         for l in self.LOOPS:
             call_count, average_call_duration, load, is_critical = l.stat_get()
             l.stat_reset()
-            self.log.info(
+            self.log.debug(
                 f" - {l} called {call_count} times, average duration {average_call_duration}s, load={int(load*100)}%"
             )
             if is_critical:

@@ -102,8 +102,9 @@ class EntityWithoutStateTopic:
         # device OR service may be used, but not both
         if self.device is None and self.service is None:
             raise ValueError("Either device or service must be set for an entity")
-        if self.device is not None and self.service is not None:
-            raise ValueError("Only one of device or service may be set for an entity")
+            
+        if self.device:
+            self.service = self.device.service
 
         if self.default_entity_id is None:
             self.default_entity_id = f"{self._component}.{clean_string(self.name)}"
@@ -145,11 +146,10 @@ class EntityWithoutStateTopic:
                 if attr_name in payload:
                     del payload[attr_name]
 
-        service = self.device.service if self.device is not None else self.service
         for key, value in list(payload.items()):
             if key.endswith("_postfix"):
                 full_key = key[:-8]
-                payload[full_key] = f"{service.data_topic_prefix}{value}"
+                payload[full_key] = f"{self.service.data_topic_prefix}{value}"
                 del payload[key]
 
         return payload
@@ -202,12 +202,10 @@ class BinarySensor(Entity):
     def __post_init__(self):
         super().__post_init__()
 
-        service = self.device.service if self.device is not None else self.service
-
         if self.payload_on is None:
-            self.payload_on = str(service.PAYLOAD_ON)
+            self.payload_on = str(self.service.PAYLOAD_ON)
         if self.payload_off is None:
-            self.payload_off = str(service.PAYLOAD_OFF)
+            self.payload_off = str(self.service.PAYLOAD_OFF)
 
 
 @dataclass
@@ -232,16 +230,16 @@ class Switch(Entity):
     optimistic: bool | None = None
     command_topic_postfix: str = ""
     command_callback: "callable | None" = None
-    payload_off: str = "off"
-    payload_on: str = "on"
+    payload_off: str = None
+    payload_on: str = None
 
     def __post_init__(self):
         super().__post_init__()
 
         if self.payload_on is None:
-            self.payload_on = self.device.service.PAYLOAD_ON
+            self.payload_on = self.service.PAYLOAD_ON
         if self.payload_off is None:
-            self.payload_off = self.device.service.PAYLOAD_OFF
+            self.payload_off = self.service.PAYLOAD_OFF
 
 
 @dataclass
@@ -294,8 +292,34 @@ class Button(EntityWithoutStateTopic):
     optimistic: bool | None = None
     command_topic_postfix: str = ""
     command_callback: "callable | None" = None
-    payload_press: str = "PRESS"
+    payload_press: str | None = None
     retain: bool | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        if self.payload_press is None:
+            self.payload_press = self.service.PAYLOAD_ON
+
+
+@dataclass
+class Siren(Entity):
+    _component = "siren"
+    optimistic: bool | None = None
+    command_topic_postfix: str = ""
+    command_callback: "callable | None" = None
+    payload_off: str | None = None
+    payload_on: str | None = None
+    support_duration: bool | None = None
+    support_volume_set: bool | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        if self.payload_on is None:
+            self.payload_on = self.service.PAYLOAD_ON
+        if self.payload_off is None:
+            self.payload_off = self.service.PAYLOAD_OFF
 
 
 @dataclass
