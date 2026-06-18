@@ -423,6 +423,26 @@ class ClimateController(EntityWithoutStateTopic):
 
 
 @dataclass
+class Camera(EntityWithoutStateTopic):
+    _component = "camera"
+    topic_postfix: str = ""
+
+    def __post_init__(self):
+        if self.topic_postfix == "":
+            raise ValueError("topic_postfix must be set for camera")
+        super().__post_init__()
+
+    def get_discover_payload(self):
+        payload = super().get_discover_payload()
+        # Rename topic_postfix to topic in the final payload
+        if "topic_postfix" in payload:
+            del payload["topic_postfix"]
+        if "topic" not in payload and self.topic_postfix:
+            payload["topic"] = f"{self.service.data_topic_prefix}{self.topic_postfix}"
+        return payload
+
+
+@dataclass
 class DeviceTracker(EntityWithoutStateTopic):
     _component = "device_tracker"
     json_attributes_topic_postfix: str | None = None
