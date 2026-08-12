@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from time import sleep
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from threading import Lock
+from time import monotonic, sleep
+from typing import Callable, Deque, Dict, List, Optional, Tuple, Union
 
 import paho.mqtt.client as mqtt
 from yaml import FullLoader, dump, load
@@ -16,11 +19,20 @@ from miqro import ha_sensors
 
 
 class Loop:
+    """A periodically executed callback.
+
+    Scheduling uses :func:`time.monotonic`, never the wall clock: a DST
+    transition or an NTP correction that steps the system clock backwards would
+    otherwise postpone every loop in the process by the size of the jump, which
+    for a loop that escalates an alarm is a silent, open-ended stall.
+    """
+
     fn: Callable
     interval: timedelta
-    next_call: Optional[datetime] = None
     stat_call_count: int = 0
     stat_cumulative_duration: float = 0.0
+    stat_error_count: int = 0
+    consecutive_errors: int = 0
 
     def __init__(self, fn: Callable, interval: timedelta, start: bool = True):
         self.fn = fn
@@ -29,41 +41,77 @@ class Loop:
             raise Exception("interval must be provided as timedelta!")
 
         self.interval = interval
-        if start:
-            self.next_call = datetime.now()
+        self._next_call: Optional[float] = monotonic() if start else None
 
-    def run_if_needed(self, instance: "Service") -> Optional[datetime]:
-        now = datetime.now()
-        if self.next_call and now >= self.next_call:
-            if self.fn(instance) is not False:
-                self.next_call = now + self.interval
-                self.stat_call_count += 1
-                self.stat_cumulative_duration += (datetime.now() - now).total_seconds()
-                return self.next_call
-            else:
-                self.stop()
-        return None
+    @property
+    def interval_seconds(self) -> float:
+        return self.interval.total_seconds()
+
+    @property
+    def next_call(self) -> Optional[datetime]:
+        """Wall-clock estimate of the next execution, for display only."""
+        if self._next_call is None:
+            return None
+        return datetime.now() + timedelta(seconds=self._next_call - monotonic())
+
+    def is_running(self) -> bool:
+        return self._next_call is not None
+
+    def run_if_needed(self, instance: "Service") -> Optional[float]:
+        """Execute the callback if it is due.
+
+        Returns the monotonic timestamp of the next execution, or ``None`` if
+        the loop is not running.  Exceptions raised by the callback are logged
+        and counted but never propagated: one broken loop must not stop the
+        others, and must not take the process down silently.
+        """
+        if self._next_call is None:
+            return None
+
+        now = monotonic()
+        if now < self._next_call:
+            return self._next_call
+
+        try:
+            keep_running = self.fn(instance) is not False
+        except Exception as e:
+            self.stat_error_count += 1
+            self.consecutive_errors += 1
+            instance.log.exception(f"{self} raised {e!r}; loop continues")
+            instance.note_failure(f"{self}: {e!r}")
+            # Back off a little so a persistently failing loop cannot spin.
+            self._next_call = now + max(self.interval_seconds, 1.0)
+            return self._next_call
+
+        self.consecutive_errors = 0
+        self.stat_call_count += 1
+        self.stat_cumulative_duration += monotonic() - now
+
+        if not keep_running:
+            self.stop()
+            return None
+
+        self._next_call = now + self.interval_seconds
+        return self._next_call
 
     def start(self, delayed=False):
-        if delayed:
-            self.next_call = datetime.now() + self.interval
-        else:
-            self.next_call = datetime.now()
+        self._next_call = monotonic() + (self.interval_seconds if delayed else 0.0)
 
     def stop(self):
-        self.next_call = None
+        self._next_call = None
 
     def restart(self, delayed=False):
         self.start(delayed=delayed)
 
     def get_remaining(self) -> Optional[timedelta]:
-        if self.next_call is None:
+        if self._next_call is None:
             return None
-        return self.next_call - datetime.now()
+        return timedelta(seconds=self._next_call - monotonic())
 
     def stat_reset(self):
         self.stat_call_count = 0
         self.stat_cumulative_duration = 0.0
+        self.stat_error_count = 0
 
     def stat_get(self) -> Tuple[int, float, float, bool]:
         average_call_duration = (
@@ -143,18 +191,47 @@ class State:
         self.service = service
         self._file = self.DATA_ROOT / (service.SERVICE_NAME + ".yaml")
 
+        self._data = self._load()
+        self.service.log.debug(f"State: Loaded {self._data}")
+
+    def _load(self) -> Dict:
+        """Load the state file, tolerating anything that is wrong with it.
+
+        A truncated or corrupt file (a power loss during a previous save, a
+        full disk) must not stop the service from starting: starting with
+        default state is recoverable, refusing to start is not.
+        """
         try:
             if not self._file.exists():
                 self._file.parent.mkdir(parents=True, exist_ok=True)
-                self._data = {}
-            else:
-                with self._file.open() as f:
-                    self._data = load(f, Loader=FullLoader)
-        except PermissionError as e:
-            service.log.error(e)
-            self._data = {}
+                return {}
 
-        self.service.log.debug(f"State: Loaded {self._data}")
+            with self._file.open() as f:
+                data = load(f, Loader=FullLoader)
+
+            if data is None:
+                return {}
+            if not isinstance(data, dict):
+                raise ValueError(f"expected a mapping, found {type(data).__name__}")
+            return data
+        except PermissionError as e:
+            self.service.log.error(e)
+            return {}
+        except Exception as e:
+            self.service.log.error(
+                f"State: {self._file} is unusable ({e!r}); starting with empty state."
+            )
+            self._quarantine()
+            return {}
+
+    def _quarantine(self) -> None:
+        """Move a broken state file aside so the next save starts clean."""
+        broken = self._file.with_suffix(self._file.suffix + ".broken")
+        try:
+            self._file.replace(broken)
+            self.service.log.error(f"State: moved unusable state file to {broken}")
+        except Exception as e:
+            self.service.log.error(f"State: could not move {self._file} aside: {e!r}")
 
     def __getitem__(self, key):
         return self._data[key]
@@ -184,9 +261,28 @@ class State:
         return d
 
     def save(self):
+        """Write the state file atomically.
+
+        Writing in place risks leaving a truncated file behind if the machine
+        loses power mid-write, which on the next start would take the service
+        down.  Write a temporary file, fsync it, then rename over the target:
+        readers see either the old file or the new one.
+        """
         self.service.log.debug(f"State: Saving {self._data}")
-        with self._file.open("w") as f:
-            dump(self._data, f)
+        tmp = self._file.with_suffix(self._file.suffix + ".tmp")
+        try:
+            with tmp.open("w") as f:
+                dump(self._data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._file)
+        except Exception as e:
+            self.service.log.error(f"State: could not save {self._file}: {e!r}")
+            self.service.note_failure(f"state save failed: {e!r}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 class Service:
@@ -202,6 +298,19 @@ class Service:
 
     PAYLOAD_ON = "1"
     PAYLOAD_OFF = "0"
+
+    # QoS used for subscriptions.  At-least-once means the broker redelivers
+    # after a dropped connection instead of silently discarding.
+    SUBSCRIBE_QOS: int = 1
+
+    # With a persistent session the broker queues matching messages while the
+    # service is disconnected, instead of dropping them.  Services that must
+    # not miss an input should set this to False.
+    CLEAN_SESSION: bool = True
+
+    # Incoming messages are handled on the main loop thread rather than paho's
+    # network thread; see _on_message.
+    MAX_INCOMING_QUEUE: int = 10000
 
     ha_devices: List[ha_sensors.Device] = []
     ha_entities: List[ha_sensors.Entity] = []  # only entities without device
@@ -223,6 +332,15 @@ class Service:
     mqtt_global_handlers: List[Tuple[str, Callable]]
     state: Optional[State] = None
 
+    # Health bookkeeping.  Anything that swallows an exception in order to keep
+    # running records it here so that watchdogs can tell "running" from
+    # "running correctly".
+    last_failure: Optional[str] = None
+    last_failure_at: Optional[datetime] = None
+    failure_count: int = 0
+    last_message_received_at: Optional[float] = None
+    disconnect_count: int = 0
+
     def __init__(
         self,
         add_config_file_path=None,
@@ -235,7 +353,11 @@ class Service:
 
         self.last_key_values = {}
 
-        self.mqtt_client = mqtt_client_cls(self.SERVICE_NAME)
+        self._incoming: Deque[Tuple[str, str]] = deque()
+        self._incoming_lock = Lock()
+        self._mqtt_loop_started = False
+
+        self.mqtt_client = self._make_mqtt_client(mqtt_client_cls)
         if "auth" in self.config:
             self.mqtt_client.username_pw_set(**self.config["auth"])
         if "tls" in self.config:
@@ -262,6 +384,57 @@ class Service:
 
     def __str__(self):
         return self.SERVICE_NAME
+
+    def _make_mqtt_client(self, mqtt_client_cls):
+        # Only pass clean_session when the service opts out of it, so that
+        # client doubles and older signatures keep working unchanged.
+        if self.CLEAN_SESSION:
+            return mqtt_client_cls(self.SERVICE_NAME)
+        try:
+            return mqtt_client_cls(self.SERVICE_NAME, clean_session=False)
+        except TypeError:
+            self.log.warning(
+                "MQTT client does not accept clean_session; "
+                "messages may be lost while disconnected."
+            )
+            return mqtt_client_cls(self.SERVICE_NAME)
+
+    # -- health ---------------------------------------------------------------
+
+    def note_failure(self, description: str) -> None:
+        """Record that something was swallowed in order to keep running.
+
+        Callers that catch an exception to protect the process should report it
+        here so that :meth:`healthy` and any external watchdog can see that the
+        service is degraded even though it is still up.
+        """
+        self.failure_count += 1
+        self.last_failure = description
+        self.last_failure_at = datetime.now()
+
+    def mqtt_thread_alive(self) -> bool:
+        """Whether paho's network thread is still running.
+
+        An exception escaping a callback kills that thread while leaving the
+        process running, which would otherwise be invisible: the main loop keeps
+        spinning and publishes keep being queued but never sent.
+        """
+        if not self._mqtt_loop_started:
+            return True  # not started yet; nothing to be wrong with
+        thread = getattr(self.mqtt_client, "_thread", None)
+        if thread is None:
+            return False
+        is_alive = getattr(thread, "is_alive", None)
+        return is_alive() if callable(is_alive) else True
+
+    def healthy(self) -> bool:
+        """Whether the service is not just running but working.
+
+        Deliberately does *not* consider :attr:`failure_count`, which counts
+        historical, already-recovered problems; callers wanting a stricter
+        check should look at that themselves.
+        """
+        return self.is_connected and self.mqtt_thread_alive()
 
     def _make_tls_config(self, config):
         # cert_reqs and tls_version are strings pointing to properties in
@@ -309,7 +482,10 @@ class Service:
         self.mqtt_log.setLevel(logging.INFO)
 
     def _read_config(self, add_config_file_path=None):
-        paths = self.CONFIG_FILE_PATHS
+        # Copy: CONFIG_FILE_PATHS is a class attribute, and prepending to it
+        # directly would accumulate across every service constructed in the
+        # process.
+        paths = list(self.CONFIG_FILE_PATHS)
         if add_config_file_path:
             paths.insert(0, Path(add_config_file_path))
 
@@ -350,9 +526,11 @@ class Service:
 
         for topic, _ in self._all_handlers():
             self.log.info(f"  - {topic}")
-            client.subscribe(topic)
+            client.subscribe(topic, qos=self.SUBSCRIBE_QOS)
 
-        self.mqtt_client.publish(self.willtopic, "1", retain=True)
+        self.mqtt_client.publish(
+            self.willtopic, "1", retain=True, qos=self.QOS_AT_LEAST_ONCE
+        )
 
         self._publish_ha_discovery()
 
@@ -368,15 +546,25 @@ class Service:
             entity.publish_discovery(prefix)
 
     def _on_disconnect(self, client, userdata, rc):
-        self.log.warning(f"MQTT disconnected, rc={rc}")
+        self.disconnect_count += 1
         self.is_connected = False
+        if rc == 0:
+            self.log.info("MQTT disconnected cleanly")
+        else:
+            self.log.warning(
+                f"MQTT disconnected unexpectedly, rc={rc} "
+                f"(disconnect #{self.disconnect_count})"
+            )
+            self.note_failure(f"MQTT disconnected, rc={rc}")
 
     def add_handler(self, topic, handler):
         self.mqtt_handlers.append((topic, handler))
 
         if self.is_connected:
             self.log.info(f"Subscribing to {self.data_topic_prefix + topic}")
-            self.mqtt_client.subscribe(self.data_topic_prefix + topic)
+            self.mqtt_client.subscribe(
+                self.data_topic_prefix + topic, qos=self.SUBSCRIBE_QOS
+            )
 
     def add_global_handler(self, topic, handler):
         """
@@ -388,9 +576,11 @@ class Service:
 
         if self.is_connected:
             self.log.info(f"Subscribing to {topic}")
-            self.mqtt_client.subscribe(topic)
+            self.mqtt_client.subscribe(topic, qos=self.SUBSCRIBE_QOS)
 
-    def _on_enable(self, payload):
+    def _on_enable(self, _, payload):
+        # Registered as a bound method, so dispatch passes (service, payload)
+        # on top of the bound self -- hence the ignored first argument.
         if payload == "1":
             self.enabled = True
         else:
@@ -399,20 +589,27 @@ class Service:
         return
 
     def _update_online_status(self, _):
-        self.publish(self.willtopic, "1", retain=True, global_=True)
+        self.publish(
+            self.willtopic, "1", retain=True, qos=self.QOS_AT_LEAST_ONCE, global_=True
+        )
 
         assert self.LOOPS
 
         self.log.debug("Loop stats:")
         for l in self.LOOPS:
             call_count, average_call_duration, load, is_critical = l.stat_get()
+            error_count = l.stat_error_count
             l.stat_reset()
             self.log.debug(
                 f" - {l} called {call_count} times, average duration {average_call_duration}s, load={int(load*100)}%"
             )
             if is_critical:
-                self.log.warn(
+                self.log.warning(
                     f"   {l} takes, on average, longer to execute ({average_call_duration}s) than defined interval ({l.interval.total_seconds()})"
+                )
+            if error_count:
+                self.log.error(
+                    f"   {l} raised {error_count} time(s) in the last reporting period"
                 )
 
     def _all_handlers(self):
@@ -423,33 +620,96 @@ class Service:
             yield self.data_topic_prefix + topic, handler
 
     def _on_message(self, client, userdata, msg):
+        """Queue an incoming message; it is handled on the main loop thread.
+
+        Handling messages here, on paho's network thread, has two problems: an
+        exception escaping this callback kills that thread (leaving the process
+        running but deaf), and handlers race with the loops that share their
+        state.  Queueing sidesteps both.
+        """
         payload = str(msg.payload.decode("utf-8", errors="replace")).strip()
         self.log.debug(
             f"Received MQTT message on topic {msg.topic} containing {payload}"
         )
+        self.last_message_received_at = monotonic()
 
+        with self._incoming_lock:
+            if len(self._incoming) >= self.MAX_INCOMING_QUEUE:
+                dropped_topic, _ = self._incoming.popleft()
+                self.log.error(
+                    f"Incoming queue full ({self.MAX_INCOMING_QUEUE}); "
+                    f"dropped oldest message on {dropped_topic}"
+                )
+                self.note_failure("incoming message queue overflowed")
+            self._incoming.append((msg.topic, payload))
+
+    def _drain_incoming(self) -> int:
+        """Dispatch every queued incoming message. Returns how many were handled."""
+        count = 0
+        while True:
+            with self._incoming_lock:
+                if not self._incoming:
+                    return count
+                topic, payload = self._incoming.popleft()
+            self._dispatch(topic, payload)
+            count += 1
+
+    def _dispatch(self, msg_topic: str, payload: str) -> None:
         handled = False
         for topic, handler in self._all_handlers():
-            if "#" in topic:
-                prefix = topic[:-1]
-                self.log.debug(f"matching {prefix} against {msg.topic}")
-                if msg.topic.startswith(prefix):
-                    handler(self, payload, msg.topic[len(prefix) :])
-                    handled = True
-            else:
-                if topic == msg.topic:
+            matched, remainder = self._match(topic, msg_topic)
+            if not matched:
+                continue
+            handled = True
+            # One failing handler must not prevent the others from running:
+            # several inputs can share a topic, and a bad payload for one of
+            # them is not a reason to drop the message for the rest.
+            try:
+                if remainder is None:
                     handler(self, payload)
-                    handled = True
+                else:
+                    handler(self, payload, remainder)
+            except Exception as e:
+                self.log.exception(
+                    f"Handler {getattr(handler, '__qualname__', handler)} failed for "
+                    f"topic '{msg_topic}': {e!r}"
+                )
+                self.note_failure(f"handler for '{msg_topic}' raised {e!r}")
 
         if handled:
             return
 
-        if self.handle_message(msg.topic, payload):
+        try:
+            if self.handle_message(msg_topic, payload):
+                return
+        except Exception as e:
+            self.log.exception(f"handle_message failed for '{msg_topic}': {e!r}")
+            self.note_failure(f"handle_message for '{msg_topic}' raised {e!r}")
             return
 
         self.log.error(
-            f"Unhandled topic '{msg.topic}', registered handlers for: {', '.join(k for (k, v) in self._all_handlers())}"
+            f"Unhandled topic '{msg_topic}', registered handlers for: {', '.join(k for (k, v) in self._all_handlers())}"
         )
+
+    @staticmethod
+    def _match(subscription: str, msg_topic: str) -> Tuple[bool, Optional[str]]:
+        """Match a topic against a subscription pattern.
+
+        Returns ``(matched, remainder)``, where ``remainder`` is the part of the
+        topic covered by a trailing ``#`` (passed to the handler as a second
+        argument) or ``None`` for subscriptions without one.
+
+        Uses paho's matcher so that ``+`` and mid-topic wildcards behave the way
+        the broker does -- comparing topics by equality means a subscription
+        containing ``+`` is established at the broker but never dispatched here,
+        so those messages arrive and are silently discarded.
+        """
+        if not mqtt.topic_matches_sub(subscription, msg_topic):
+            return False, None
+        if subscription.endswith("#"):
+            # "a/b/#" also matches "a/b" itself, which has no remainder.
+            return True, msg_topic[len(subscription) - 1 :]
+        return True, None
 
     def handle_message(self, topic, payload):
         return False
@@ -479,7 +739,9 @@ class Service:
         elif message is None:
             message = ""
         elif type(message) in [dict, list]:
-            self.publish_json(ext, message, retain, qos, only_if_changed)
+            self.publish_json(
+                ext, message, retain, qos, only_if_changed, global_=global_
+            )
             return
         else:
             message = self._round_floats(message)
@@ -508,9 +770,21 @@ class Service:
 
         self.log.debug(f"MQTT publish: {topic}: {message}")
         try:
-            self.mqtt_client.publish(topic, message, retain=retain, qos=qos)
+            info = self.mqtt_client.publish(topic, message, retain=retain, qos=qos)
         except Exception as e:
             self.log.exception(e)
+            self.note_failure(f"publish to '{topic}' raised {e!r}")
+            return None
+
+        # A QoS 0 publish while disconnected is discarded by paho, which reports
+        # it only through this return code.  Silence here means a message the
+        # caller believes was delivered never left the process.
+        rc = getattr(info, "rc", 0)
+        if rc != 0:
+            self.log.error(f"MQTT publish to '{topic}' failed with rc={rc}")
+            self.note_failure(f"publish to '{topic}' failed with rc={rc}")
+
+        return info
 
     def publish_json(
         self,
@@ -521,10 +795,11 @@ class Service:
         only_if_changed: Union[bool, timedelta] = False,
         global_=False,
     ):
-        self.publish(
+        return self.publish(
             ext,
             json.dumps(self._round_floats(message_json)),
             retain=retain,
+            qos=qos,
             only_if_changed=only_if_changed,
             global_=global_,
         )
@@ -551,6 +826,7 @@ class Service:
                     key,
                     value,
                     retain=retain,
+                    qos=qos,
                     only_if_changed=only_if_changed,
                     global_=global_,
                 )
@@ -558,19 +834,40 @@ class Service:
     def _loop_step(self):
         assert self.LOOPS is not None
 
-        earliest_next_call = datetime.now() + timedelta(seconds=self.MAX_LOOP_INTERVAL)
+        self._drain_incoming()
+
+        earliest_next_call = monotonic() + self.MAX_LOOP_INTERVAL
         for loop in self.LOOPS:
             next_call = loop.run_if_needed(self)
-            if next_call:
+            if next_call is not None:
                 earliest_next_call = min(earliest_next_call, next_call)
 
-        sleep(max(0, (earliest_next_call - datetime.now()).total_seconds()))
+        # Do not sleep past a message that is already waiting.
+        with self._incoming_lock:
+            if self._incoming:
+                return
+
+        sleep(max(0.0, earliest_next_call - monotonic()))
 
     def run(self):
         self.mqtt_client.loop_start()
-        while not self.stop:
-            self._loop_step()
-        self.mqtt_client.loop_stop()
+        self._mqtt_loop_started = True
+        try:
+            while not self.stop:
+                self._loop_step()
+
+                if not self.mqtt_thread_alive():
+                    # Nothing can be received or sent any more.  Exiting lets
+                    # the service manager restart us; carrying on would leave a
+                    # process that looks alive but handles nothing.
+                    self.log.critical(
+                        "MQTT network thread has died; shutting down so that "
+                        "the service manager can restart this service."
+                    )
+                    self.note_failure("MQTT network thread died")
+                    raise SystemExit(1)
+        finally:
+            self.mqtt_client.loop_stop()
 
     def _round_floats(self, o):
         if isinstance(o, float):
