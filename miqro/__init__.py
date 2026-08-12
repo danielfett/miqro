@@ -781,8 +781,15 @@ class Service:
         # caller believes was delivered never left the process.
         rc = getattr(info, "rc", 0)
         if rc != 0:
-            self.log.error(f"MQTT publish to '{topic}' failed with rc={rc}")
-            self.note_failure(f"publish to '{topic}' failed with rc={rc}")
+            if self.is_connected:
+                self.log.error(f"MQTT publish to '{topic}' failed with rc={rc}")
+                self.note_failure(f"publish to '{topic}' failed with rc={rc}")
+            else:
+                # Expected before the first connection and during an outage;
+                # already visible through the online topic and healthy().
+                self.log.warning(
+                    f"MQTT publish to '{topic}' dropped: not connected (rc={rc})"
+                )
 
         return info
 

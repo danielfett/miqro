@@ -285,10 +285,25 @@ def test_publish_failure_is_recorded(service, monkeypatch):
         service.mqtt_client, "publish", lambda *a, **k: FailingInfo()
     )
 
+    service.mqtt_client.ensure_connected()
     service.publish("some/topic", "value")
 
     assert service.failure_count == 1
     assert "rc=4" in service.last_failure
+
+
+def test_publish_failure_while_disconnected_is_not_counted(service, monkeypatch):
+    """Publishes before the first connection are expected, not a degradation."""
+
+    class FailingInfo:
+        rc = 4
+
+    monkeypatch.setattr(service.mqtt_client, "publish", lambda *a, **k: FailingInfo())
+
+    assert not service.is_connected
+    service.publish("some/topic", "value")
+
+    assert service.failure_count == 0, service.last_failure
 
 
 def test_qos_is_forwarded_through_json_helpers(service):
