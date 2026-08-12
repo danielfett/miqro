@@ -19,7 +19,10 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     install_requires=[
-        "paho-mqtt",
+        # The v1 callback API is used throughout, and client_id is passed
+        # positionally; paho 2.x takes callback_api_version first and would fail
+        # at construction.
+        "paho-mqtt>=1.6.1,<2",
         "pyyaml",
     ],
     python_requires=">=3.9",
