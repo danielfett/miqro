@@ -47,7 +47,29 @@ class Device:
     def add_entity(self, entity):
         self.__entities.append(entity)
 
-    def publish_discovery(self, prefix):
+    def build_availability(self) -> list[dict]:
+        """The discovery payload's ``availability`` entries.
+
+        Split out so that a device which is only reachable while something else
+        is up -- a bus, a gateway -- can add its own entry by overriding this,
+        rather than by intercepting the publish.
+        """
+        return [
+            {
+                "topic": self.service.willtopic,
+                "payload_available": "1",
+                "payload_not_available": "0",
+            }
+        ]
+
+    def build_discovery_payload(self) -> dict:
+        """Build the discovery payload without publishing it.
+
+        Building and publishing in one step leaves a subclass that wants to
+        change one field of the payload no option but to intercept the
+        service's publish method around a super() call; overriding this instead
+        is a supported way to do it.
+        """
         device_payload = {
             k: v
             for k, v in self.__dict__.items()
@@ -62,21 +84,26 @@ class Device:
         payload = {
             "device": device_payload,
             "origin": {"name": f"MIQRO service {self.service.SERVICE_NAME}"},
-            "availability": [
-                {
-                    "topic": self.service.willtopic,
-                    "payload_available": "1",
-                    "payload_not_available": "0",
-                }
-            ],
+            "availability": self.build_availability(),
             "components": {},
         }
 
-        for entity in self.__entities:
+        for entity in self.entities:
             payload["components"][entity.unique_id] = entity.get_discover_payload()
 
-        topic = f"{prefix}/device/{self._unique_id}/config"
-        self.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
+        return payload
+
+    def discovery_topic(self, prefix) -> str:
+        return f"{prefix}/device/{self._unique_id}/config"
+
+    def publish_discovery(self, prefix):
+        self.service.publish_json(
+            self.discovery_topic(prefix),
+            self.build_discovery_payload(),
+            qos=1,
+            retain=True,
+            global_=True,
+        )
 
 
 @dataclass
@@ -154,16 +181,25 @@ class EntityWithoutStateTopic:
 
         return payload
 
-    def publish_discovery(self, prefix):
+    def build_discovery_payload(self) -> dict:
+        """Build the discovery payload without publishing it; see
+        :meth:`Device.build_discovery_payload`."""
         # only if device is none
         if self.device is not None:
             raise ValueError(
                 "publish_discovery can only be called for entities without device"
             )
 
-        payload = self.get_discover_payload()
-        topic = f"{prefix}/{self._component}/{self.unique_id}/config"
-        self.service.publish_json(topic, payload, qos=1, retain=True, global_=True)
+        return self.get_discover_payload()
+
+    def discovery_topic(self, prefix) -> str:
+        return f"{prefix}/{self._component}/{self.unique_id}/config"
+
+    def publish_discovery(self, prefix):
+        payload = self.build_discovery_payload()
+        self.service.publish_json(
+            self.discovery_topic(prefix), payload, qos=1, retain=True, global_=True
+        )
 
 
 @dataclass

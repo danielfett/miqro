@@ -12,7 +12,14 @@ import pytest
 import yaml
 
 import miqro
-from miqro.test.tools import DummyMQTTClient, DummyState, expect_next, run, send
+from miqro.test.tools import (
+    DummyMessage,
+    DummyMQTTClient,
+    DummyState,
+    expect_next,
+    run,
+    send,
+)
 
 log = logging.getLogger("test_reliability")
 
@@ -97,6 +104,133 @@ def test_enable_command_does_not_raise(service):
     assert service.enabled is True
 
 
+def test_a_disabled_service_ignores_commands(service):
+    """'enabled' was advertised and subscribed, but did nothing at all."""
+    seen = []
+    service.add_global_handler("cmd/topic", lambda svc, p: seen.append(p))
+
+    send(service, "service/probe/enabled", "0")
+    send(service, "cmd/topic", "ignored")
+    assert seen == []
+
+    # ... and the service can still be switched back on.
+    send(service, "service/probe/enabled", "1")
+    send(service, "cmd/topic", "handled")
+    assert seen == ["handled"]
+
+
+def test_a_disabled_service_does_not_fall_through_to_handle_message(config_path):
+    class CatchAll(ProbeService):
+        seen = []
+
+        def handle_message(self, topic, payload):
+            self.seen.append(payload)
+            return True
+
+    svc = CatchAll(config_path, mqtt_client_cls=DummyMQTTClient)
+    svc.add_global_handler("other/topic", lambda s, p: None)  # forces a subscription
+
+    send(svc, "service/probe/enabled", "0")
+    send(svc, "anything/at/all", "x")
+    assert svc.seen == []
+
+
+def test_an_unexpected_enabled_payload_does_not_disable(service):
+    """An empty retained message must not switch a service off."""
+    send(service, "service/probe/enabled", "")
+    assert service.enabled is True
+
+    send(service, "service/probe/enabled", "yes please")
+    assert service.enabled is True
+
+
+def test_bound_method_handlers_are_called_correctly(service):
+    """Both calling conventions work; the convention is fixed at registration."""
+    seen = []
+
+    class Sink:
+        def modern(self, payload):
+            seen.append(("modern", payload))
+
+        def legacy(self, _service, payload):
+            seen.append(("legacy", payload))
+
+        def with_remainder(self, payload, remainder):
+            seen.append(("remainder", payload, remainder))
+
+    sink = Sink()
+    service.add_global_handler("bound/modern", sink.modern)
+    service.add_global_handler("bound/legacy", sink.legacy)
+    service.add_global_handler("bound/rest/#", sink.with_remainder)
+
+    send(service, "bound/modern", "a")
+    send(service, "bound/legacy", "b")
+    send(service, "bound/rest/deep", "c")
+
+    assert seen == [
+        ("modern", "a"),
+        ("legacy", "b"),
+        ("remainder", "c", "deep"),
+    ]
+    assert service.failure_count == 0, service.last_failure
+
+
+def test_a_handler_of_the_wrong_shape_fails_at_registration(service):
+    """Registering it, not the first message weeks later, is where it breaks."""
+    with pytest.raises(TypeError):
+        service.add_global_handler("some/topic", lambda: None)
+
+    with pytest.raises(TypeError):
+        service.add_handler("some/topic/#", lambda svc: None)
+
+
+def test_subclass_handlers_do_not_leak_into_the_parent(config_path):
+    """A child's handlers used to be appended to the parent's class list."""
+
+    class Parent(miqro.Service):
+        SERVICE_NAME = "probe"
+
+        @miqro.handle("parent")
+        def on_parent(self, payload):
+            pass
+
+        @miqro.loop(seconds=10)
+        def parent_loop(self):
+            pass
+
+    class Child(Parent):
+        @miqro.handle("child")
+        def on_child(self, payload):
+            pass
+
+        @miqro.handle_global("global/child")
+        def on_global_child(self, payload):
+            pass
+
+        @miqro.loop(seconds=10)
+        def child_loop(self):
+            pass
+
+    assert [t for t, _ in Parent.CLASS_MQTT_HANDLERS] == ["parent"]
+    assert sorted(t for t, _ in Child.CLASS_MQTT_HANDLERS) == ["child", "parent"]
+    assert Parent.CLASS_MQTT_GLOBAL_HANDLERS == []
+    assert [t for t, _ in Child.CLASS_MQTT_GLOBAL_HANDLERS] == ["global/child"]
+
+    assert [f.__name__ for f, _ in Parent.PREPARED_LOOPS] == ["parent_loop"]
+    assert sorted(f.__name__ for f, _ in Child.PREPARED_LOOPS) == [
+        "child_loop",
+        "parent_loop",
+    ]
+
+    # The base class must be left alone by all of this.
+    assert miqro.Service.CLASS_MQTT_HANDLERS == []
+    assert miqro.Service.PREPARED_LOOPS == []
+
+    parent = Parent(config_path, mqtt_client_cls=DummyMQTTClient)
+    parent.mqtt_client.ensure_connected()
+    assert "service/probe/child" not in parent.mqtt_client.subscribed
+
+
 def test_messages_are_handled_on_the_loop_thread(service):
     """Dispatch happens in _loop_step, not in the paho callback."""
     seen = []
@@ -109,6 +243,106 @@ def test_messages_are_handled_on_the_loop_thread(service):
     assert seen == [], "handled on the receiving thread"
     service._loop_step()
     assert seen == ["v"]
+
+
+def test_subclass_overriding_loop_step_still_dispatches(config_path):
+    """A service that paces itself used to go deaf.
+
+    Overriding _loop_step is the natural thing to do for a service driven by a
+    blocking read of its own; the override dropped the only call to
+    _drain_incoming in the codebase, so every incoming message was queued and
+    never handled while the service stayed connected, kept publishing and
+    reported itself healthy.
+    """
+
+    class Overriding(ProbeService):
+        def _loop_step(self):
+            for loop in self.LOOPS:
+                loop.run_if_needed(self)
+            self.stop = True  # one iteration is enough for the test
+
+    svc = Overriding(config_path, mqtt_client_cls=DummyMQTTClient)
+    seen = []
+    svc.add_global_handler("t/x", lambda s, p: seen.append(p))
+
+    client = svc.mqtt_client
+    client.ensure_connected()
+    client.on_message(client, None, DummyMessage("t/x", "v"))
+    assert seen == []
+
+    with pytest.warns(DeprecationWarning, match="_wait_for_work"):
+        svc.run()
+
+    assert seen == ["v"]
+
+
+def test_wait_for_work_is_the_supported_override(service, monkeypatch):
+    """The hook a self-paced service is meant to use instead."""
+    waits = []
+    monkeypatch.setattr(
+        type(service), "_wait_for_work", lambda self, timeout: waits.append(timeout)
+    )
+
+    seen = []
+    service.add_global_handler("t/x", lambda svc, p: seen.append(p))
+
+    client = service.mqtt_client
+    client.ensure_connected()
+    client.on_message(client, None, DummyMessage("t/x", "v"))
+
+    service._loop_step()
+    assert seen == ["v"], "the framework step still dispatches"
+    assert waits and waits[-1] >= 0.0, "waiting goes through the hook, not sleep()"
+
+    # A message arriving while the loops run must not be slept past.
+    def inject(svc):
+        client.on_message(client, None, DummyMessage("t/x", "w"))
+        return False
+
+    service.add_loop(miqro.Loop(inject, timedelta(seconds=1), start=True))
+    waits.clear()
+    service._loop_step()
+    assert waits == []
+
+
+def test_an_undispatched_queue_is_reported(service):
+    """A queue nobody drains must be visible long before it overflows."""
+    service.mqtt_client.ensure_connected()
+    service._mqtt_loop_started = True
+    service.add_global_handler("t/x", lambda svc, p: None)
+
+    client = service.mqtt_client
+    client.on_message(client, None, DummyMessage("t/x", "v"))
+    assert service.healthy(), "a message that just arrived is not a stall"
+
+    # As if nothing had drained the queue since it was enqueued.
+    service._incoming_oldest_at = monotonic() - service.INCOMING_STALL_WARN_SECONDS - 1
+
+    assert not service.healthy()
+    service._update_online_status(service)
+    assert service.failure_count == 1
+    assert "stalled" in service.last_failure
+
+    service._drain_incoming()
+    assert service.healthy()
+    assert service._incoming_oldest_at is None
+
+
+def test_a_steady_stream_is_not_a_stall(service):
+    """The age tracked is the head's, not the first message ever queued."""
+    service.mqtt_client.ensure_connected()
+    service._mqtt_loop_started = True
+    service.add_global_handler("t/x", lambda svc, p: None)
+
+    client = service.mqtt_client
+    for _ in range(3):
+        client.on_message(client, None, DummyMessage("t/x", "v"))
+    service._incoming_oldest_at = monotonic() - service.INCOMING_STALL_WARN_SECONDS - 1
+    assert not service.healthy()
+
+    service._drain_incoming()
+    client.on_message(client, None, DummyMessage("t/x", "v"))
+    assert service.healthy()
 
 
 # --------------------------------------------------------------------------

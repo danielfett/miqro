@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "miqro"
-version = "1.3.0"
+version = "1.4.0"
 description = "MIQRO is an MQTT Micro-Service Library for Python"
 authors = ["Daniel Fett <mail@danielfett.de>"]
 

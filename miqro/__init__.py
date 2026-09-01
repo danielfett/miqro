@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import os
 import sys
+import warnings
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -138,8 +140,12 @@ def loop(*args, **kwargs):
             self.fn = fn
 
         def __set_name__(self, owner: "Service", name):
-            if not owner.PREPARED_LOOPS:
-                owner.PREPARED_LOOPS = []
+            # Give the class its own list unless it already has one.  Testing
+            # for emptiness instead would append to the *parent's* list when
+            # subclassing a service that already has loops, so the parent would
+            # start running its child's loops as well.
+            if "PREPARED_LOOPS" not in owner.__dict__:
+                owner.PREPARED_LOOPS = list(owner.PREPARED_LOOPS)
             owner.PREPARED_LOOPS.append((self.fn, timedelta(*args, **kwargs)))
 
     return class_decorator
@@ -152,8 +158,10 @@ def handle(topic_ext):
             self.fn = fn
 
         def __set_name__(self, owner: "Service", name):
-            if not owner.CLASS_MQTT_HANDLERS:
-                owner.CLASS_MQTT_HANDLERS = []
+            # See the note in loop(): the child's handlers must not be added to
+            # the parent's list, or the parent subscribes to its child's topics.
+            if "CLASS_MQTT_HANDLERS" not in owner.__dict__:
+                owner.CLASS_MQTT_HANDLERS = list(owner.CLASS_MQTT_HANDLERS)
             owner.CLASS_MQTT_HANDLERS.append((topic_ext, self.fn))
 
     return class_decorator
@@ -166,8 +174,11 @@ def handle_global(topic):
             self.fn = fn
 
         def __set_name__(self, owner: "Service", name):
-            if not owner.CLASS_MQTT_GLOBAL_HANDLERS:
-                owner.CLASS_MQTT_GLOBAL_HANDLERS = []
+            # See the note in loop().
+            if "CLASS_MQTT_GLOBAL_HANDLERS" not in owner.__dict__:
+                owner.CLASS_MQTT_GLOBAL_HANDLERS = list(
+                    owner.CLASS_MQTT_GLOBAL_HANDLERS
+                )
             owner.CLASS_MQTT_GLOBAL_HANDLERS.append((topic, self.fn))
 
     return class_decorator
@@ -178,6 +189,97 @@ def accept_json(fn):
         return fn(self, **json.loads(arg))
 
     return actual_fn
+
+
+def _positional_arity(fn) -> Optional[Tuple[int, float]]:
+    """How many positional arguments ``fn`` accepts, as ``(minimum, maximum)``.
+
+    ``None`` if that cannot be determined (a C callable, say), in which case
+    the caller falls back to the historical convention.
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return None
+
+    minimum = 0
+    maximum: float = 0
+    for param in params:
+        if param.kind is param.VAR_POSITIONAL:
+            maximum = float("inf")
+        elif param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD):
+            maximum += 1
+            if param.default is param.empty:
+                minimum += 1
+        elif param.kind is param.KEYWORD_ONLY and param.default is param.empty:
+            return None  # cannot be satisfied positionally at all
+
+    return minimum, maximum
+
+
+class Handler:
+    """A registered message handler, normalised to one calling convention.
+
+    Handlers arrive in two shapes: plain functions -- from the ``@handle``
+    decorators, or a lambda passed to :meth:`Service.add_handler` -- which take
+    the service as their first argument, and bound methods, which do not.
+    Dispatch used to pass the service either way, so a bound method needed a
+    dummy first parameter and a handler with the wrong signature failed at the
+    first message that arrived for it, possibly weeks after it was registered.
+
+    Resolving the convention once, here, means :meth:`Service._dispatch` has a
+    single way to call a handler and a mis-registered one raises where it is
+    registered.
+    """
+
+    __slots__ = ("fn", "service", "topic", "takes_service", "wants_remainder",
+                 "always_run")
+
+    def __init__(self, service: "Service", topic: str, fn: Callable,
+                 always_run: bool = False):
+        self.fn = fn
+        self.service = service
+        self.topic = topic
+        self.always_run = always_run
+        # "a/b/#" is the only subscription form that passes the remainder of
+        # the topic as a second argument.
+        self.wants_remainder = topic.endswith("#")
+        self.takes_service = self._resolve_takes_service()
+
+    def _resolve_takes_service(self) -> bool:
+        needed = 2 if self.wants_remainder else 1
+        is_bound = (
+            inspect.ismethod(self.fn)
+            or getattr(self.fn, "__self__", None) is not None
+        )
+        arity = _positional_arity(self.fn)
+        if arity is None:
+            return not is_bound
+
+        minimum, maximum = arity
+        # Where both readings fit -- a callable with optional arguments -- take
+        # the one that matches how it was registered.
+        for takes_service in ((False, True) if is_bound else (True, False)):
+            if minimum <= needed + (1 if takes_service else 0) <= maximum:
+                return takes_service
+
+        expected = "payload" + (", topic_remainder" if self.wants_remainder else "")
+        raise TypeError(
+            f"Handler {self!r} cannot be registered for '{self.topic}': it takes "
+            f"{minimum} to {maximum} positional argument(s), but a handler for "
+            f"this topic is called as handler(service, {expected}) -- or "
+            f"handler({expected}) if it is a bound method."
+        )
+
+    def __call__(self, payload: str, remainder: Optional[str] = None):
+        args: List = [self.service] if self.takes_service else []
+        args.append(payload)
+        if self.wants_remainder:
+            args.append(remainder)
+        return self.fn(*args)
+
+    def __repr__(self):
+        return getattr(self.fn, "__qualname__", None) or repr(self.fn)
 
 
 class State:
@@ -299,18 +401,29 @@ class Service:
     PAYLOAD_ON = "1"
     PAYLOAD_OFF = "0"
 
-    # QoS used for subscriptions.  At-least-once means the broker redelivers
-    # after a dropped connection instead of silently discarding.
+    # QoS used for subscriptions.  At-least-once stops the broker from
+    # dropping a message on its way to a *connected* client; it says nothing
+    # about what happens while this service is away, which is decided by
+    # CLEAN_SESSION below.
     SUBSCRIBE_QOS: int = 1
 
-    # With a persistent session the broker queues matching messages while the
-    # service is disconnected, instead of dropping them.  Services that must
-    # not miss an input should set this to False.
+    # A clean session keeps nothing between connections: the broker discards
+    # this client's subscriptions and anything addressed to it as soon as the
+    # connection drops, so commands sent during an outage are lost and
+    # _on_connect has to subscribe again on every reconnect.  Set this to False
+    # -- together with SUBSCRIBE_QOS >= 1 and the stable client id that
+    # SERVICE_NAME provides -- for a service that must not miss an input; the
+    # broker then queues matching messages while it is disconnected.
     CLEAN_SESSION: bool = True
 
     # Incoming messages are handled on the main loop thread rather than paho's
     # network thread; see _on_message.
     MAX_INCOMING_QUEUE: int = 10000
+
+    # How long the oldest queued message may wait for dispatch before the
+    # service reports itself unhealthy.  Anything above a loop iteration means
+    # nobody is draining the queue.
+    INCOMING_STALL_WARN_SECONDS: float = 5.0
 
     ha_devices: List[ha_sensors.Device] = []
     ha_entities: List[ha_sensors.Entity] = []  # only entities without device
@@ -353,7 +466,10 @@ class Service:
 
         self.last_key_values = {}
 
-        self._incoming: Deque[Tuple[str, str]] = deque()
+        # (topic, payload, enqueued_at); the timestamp is what makes an
+        # undrained queue visible, see _incoming_stall().
+        self._incoming: Deque[Tuple[str, str, float]] = deque()
+        self._incoming_oldest_at: Optional[float] = None
         self._incoming_lock = Lock()
         self._mqtt_loop_started = False
 
@@ -371,9 +487,17 @@ class Service:
 
         self.enabled = True
 
-        self.mqtt_handlers = [h for h in self.CLASS_MQTT_HANDLERS]
-        self.mqtt_handlers.append(("enabled", self._on_enable))
-        self.mqtt_global_handlers = [h for h in self.CLASS_MQTT_GLOBAL_HANDLERS]
+        self.mqtt_handlers = [
+            (topic, Handler(self, topic, fn)) for topic, fn in self.CLASS_MQTT_HANDLERS
+        ]
+        # Marked always_run so that a disabled service can still be re-enabled.
+        self.mqtt_handlers.append(
+            ("enabled", Handler(self, "enabled", self._on_enable, always_run=True))
+        )
+        self.mqtt_global_handlers = [
+            (topic, Handler(self, topic, fn))
+            for topic, fn in self.CLASS_MQTT_GLOBAL_HANDLERS
+        ]
 
         if self.USE_STATE_FILE:
             self.state = state_cls(self)
@@ -432,9 +556,22 @@ class Service:
 
         Deliberately does *not* consider :attr:`failure_count`, which counts
         historical, already-recovered problems; callers wanting a stricter
-        check should look at that themselves.
+        check should look at that themselves.  A queue that is *currently* not
+        being dispatched is a different matter: the service is connected and
+        publishing, and deaf.
         """
-        return self.is_connected and self.mqtt_thread_alive()
+        if not (self.is_connected and self.mqtt_thread_alive()):
+            return False
+        stalled, _ = self._incoming_stall()
+        return stalled is None or stalled <= self.INCOMING_STALL_WARN_SECONDS
+
+    def _incoming_stall(self) -> Tuple[Optional[float], int]:
+        """How long the oldest queued message has waited, and how many wait."""
+        with self._incoming_lock:
+            depth = len(self._incoming)
+            if self._incoming_oldest_at is None:
+                return None, depth
+            return monotonic() - self._incoming_oldest_at, depth
 
     def _make_tls_config(self, config):
         # cert_reqs and tls_version are strings pointing to properties in
@@ -558,7 +695,7 @@ class Service:
             self.note_failure(f"MQTT disconnected, rc={rc}")
 
     def add_handler(self, topic, handler):
-        self.mqtt_handlers.append((topic, handler))
+        self.mqtt_handlers.append((topic, Handler(self, topic, handler)))
 
         if self.is_connected:
             self.log.info(f"Subscribing to {self.data_topic_prefix + topic}")
@@ -572,26 +709,50 @@ class Service:
         The handler will be called with the topic and payload as arguments.
         """
 
-        self.mqtt_global_handlers.append((topic, handler))
+        self.mqtt_global_handlers.append((topic, Handler(self, topic, handler)))
 
         if self.is_connected:
             self.log.info(f"Subscribing to {topic}")
             self.mqtt_client.subscribe(topic, qos=self.SUBSCRIBE_QOS)
 
-    def _on_enable(self, _, payload):
-        # Registered as a bound method, so dispatch passes (service, payload)
-        # on top of the bound self -- hence the ignored first argument.
-        if payload == "1":
+    def _on_enable(self, payload):
+        """Enable or disable dispatch of everything but this topic.
+
+        Only the two defined payloads are acted on: treating anything else as
+        "disable" means an empty retained message -- what is left behind by a
+        ``mosquitto_pub -r -n`` cleanup -- silently switches the service off at
+        the next start.
+        """
+        if payload == self.PAYLOAD_ON:
             self.enabled = True
-        else:
+        elif payload == self.PAYLOAD_OFF:
             self.enabled = False
+        else:
+            self.log.warning(
+                f"Ignoring payload {payload!r} on "
+                f"'{self.data_topic_prefix}enabled': expected "
+                f"{self.PAYLOAD_ON!r} or {self.PAYLOAD_OFF!r}. Service stays "
+                f"{'enabled' if self.enabled else 'disabled'}."
+            )
+            return
         self.log.info(f"set enabled to {self.enabled!r}")
-        return
 
     def _update_online_status(self, _):
         self.publish(
             self.willtopic, "1", retain=True, qos=self.QOS_AT_LEAST_ONCE, global_=True
         )
+
+        # Runs on a timer regardless of what the rest of the service is doing,
+        # which makes it the one place that reliably notices a queue nobody is
+        # draining -- long before it reaches MAX_INCOMING_QUEUE and starts
+        # discarding messages.
+        stalled, depth = self._incoming_stall()
+        if stalled is not None and stalled > self.INCOMING_STALL_WARN_SECONDS:
+            self.log.error(
+                f"{depth} incoming message(s) undispatched for {stalled:.0f}s - "
+                f"is _loop_step being called?"
+            )
+            self.note_failure(f"incoming queue stalled for {stalled:.0f}s")
 
         assert self.LOOPS
 
@@ -614,10 +775,17 @@ class Service:
 
     def _all_handlers(self):
         for topic, handler in self.mqtt_global_handlers:
-            yield topic, handler
+            yield topic, self._as_handler(topic, handler)
 
         for topic, handler in self.mqtt_handlers:
-            yield self.data_topic_prefix + topic, handler
+            yield self.data_topic_prefix + topic, self._as_handler(topic, handler)
+
+    def _as_handler(self, topic, handler) -> Handler:
+        """Normalise a handler appended to the lists directly rather than
+        through :meth:`add_handler`."""
+        if isinstance(handler, Handler):
+            return handler
+        return Handler(self, topic, handler)
 
     def _on_message(self, client, userdata, msg):
         """Queue an incoming message; it is handled on the main loop thread.
@@ -631,17 +799,19 @@ class Service:
         self.log.debug(
             f"Received MQTT message on topic {msg.topic} containing {payload}"
         )
-        self.last_message_received_at = monotonic()
+        enqueued_at = monotonic()
+        self.last_message_received_at = enqueued_at
 
         with self._incoming_lock:
             if len(self._incoming) >= self.MAX_INCOMING_QUEUE:
-                dropped_topic, _ = self._incoming.popleft()
+                dropped_topic, _, _ = self._incoming.popleft()
                 self.log.error(
                     f"Incoming queue full ({self.MAX_INCOMING_QUEUE}); "
                     f"dropped oldest message on {dropped_topic}"
                 )
                 self.note_failure("incoming message queue overflowed")
-            self._incoming.append((msg.topic, payload))
+            self._incoming.append((msg.topic, payload, enqueued_at))
+            self._incoming_oldest_at = self._incoming[0][2]
 
     def _drain_incoming(self) -> int:
         """Dispatch every queued incoming message. Returns how many were handled."""
@@ -649,8 +819,15 @@ class Service:
         while True:
             with self._incoming_lock:
                 if not self._incoming:
+                    self._incoming_oldest_at = None
                     return count
-                topic, payload = self._incoming.popleft()
+                topic, payload, _ = self._incoming.popleft()
+                # Track the head rather than clearing only when the queue runs
+                # empty: under a steady stream it may never be seen empty, and
+                # a stale timestamp would look like a stall.
+                self._incoming_oldest_at = (
+                    self._incoming[0][2] if self._incoming else None
+                )
             self._dispatch(topic, payload)
             count += 1
 
@@ -661,22 +838,25 @@ class Service:
             if not matched:
                 continue
             handled = True
+            if not self.enabled and not handler.always_run:
+                self.log.debug(f"Service is disabled, ignoring '{msg_topic}'")
+                continue
             # One failing handler must not prevent the others from running:
             # several inputs can share a topic, and a bad payload for one of
             # them is not a reason to drop the message for the rest.
             try:
-                if remainder is None:
-                    handler(self, payload)
-                else:
-                    handler(self, payload, remainder)
+                handler(payload, remainder)
             except Exception as e:
                 self.log.exception(
-                    f"Handler {getattr(handler, '__qualname__', handler)} failed for "
-                    f"topic '{msg_topic}': {e!r}"
+                    f"Handler {handler!r} failed for topic '{msg_topic}': {e!r}"
                 )
                 self.note_failure(f"handler for '{msg_topic}' raised {e!r}")
 
         if handled:
+            return
+
+        if not self.enabled:
+            self.log.debug(f"Service is disabled, ignoring '{msg_topic}'")
             return
 
         try:
@@ -839,6 +1019,13 @@ class Service:
                 )
 
     def _loop_step(self):
+        """Run one iteration of the framework loop.
+
+        Do not override this; override :meth:`_wait_for_work` instead.  This
+        method carries an obligation of the framework -- dispatch what has
+        arrived, then run the loops that are due -- and a subclass that
+        replaces it drops that obligation silently.
+        """
         assert self.LOOPS is not None
 
         self._drain_incoming()
@@ -854,13 +1041,45 @@ class Service:
             if self._incoming:
                 return
 
-        sleep(max(0.0, earliest_next_call - monotonic()))
+        self._wait_for_work(max(0.0, earliest_next_call - monotonic()))
+
+    def _wait_for_work(self, timeout: float) -> None:
+        """Block for up to ``timeout`` seconds before the next loop iteration.
+
+        This is the part of the loop a service is meant to replace.  Services
+        that are paced by an I/O source of their own -- a blocking serial read,
+        a socket select, a hardware poll -- override this to wait on that
+        source instead of sleeping, and keep message dispatch and loop
+        scheduling intact.
+        """
+        sleep(timeout)
+
+    def _warn_if_loop_step_overridden(self) -> None:
+        if type(self)._loop_step is Service._loop_step:
+            return
+        message = (
+            f"{type(self).__name__} overrides _loop_step(); override "
+            f"_wait_for_work() instead. _loop_step() is the framework's own "
+            f"step, and replacing it skips loop scheduling."
+        )
+        warnings.warn(message, DeprecationWarning, stacklevel=3)
+        self.log.warning(message)
 
     def run(self):
+        self._warn_if_loop_step_overridden()
         self.mqtt_client.loop_start()
         self._mqtt_loop_started = True
         try:
             while not self.stop:
+                # Drained here and not only in _loop_step(): overriding
+                # _loop_step() is a natural thing to do for a service paced by
+                # its own I/O, and an override that does not chain used to stop
+                # dispatch entirely -- leaving a service that stays connected,
+                # keeps publishing and reports itself healthy while discarding
+                # every command it receives.  _drain_incoming() returns
+                # immediately on an empty queue, so doing it twice per
+                # iteration costs one lock acquisition.
+                self._drain_incoming()
                 self._loop_step()
 
                 if not self.mqtt_thread_alive():

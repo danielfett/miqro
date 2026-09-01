@@ -106,6 +106,18 @@ The MQTT base topic for each service is `service/SERVICE_NAME/`. Services can sp
 
 Using `miqro.handle_global`, handler function for all MQTT topics (outside of the service's prefix) can be registered.
 
+Handlers can also be registered at runtime with `add_handler(topic_ext, handler)` and `add_global_handler(topic, handler)`. A plain function or lambda is called with the service as its first argument (`handler(service, payload)`), a bound method without it (`handler(payload)`); handlers for a topic ending in `#` take the topic remainder as a further argument. The convention is resolved when the handler is registered, so a handler with a signature that cannot be called raises `TypeError` there rather than at the first message that arrives for it.
+
+#### Message delivery and reconnects
+
+Incoming messages are queued by the MQTT network thread and dispatched on the service's own loop thread, so a handler that raises cannot kill the connection and handlers never run concurrently with loops. A queue that is not being dispatched -- typically because a subclass replaced `_loop_step` instead of `_wait_for_work`, see [Loops](#loops) -- is logged, counted as a failure and makes `healthy()` return `False` after `INCOMING_STALL_WARN_SECONDS`.
+
+`SUBSCRIBE_QOS` (default `1`, at-least-once) governs delivery to a *connected* service only. What happens while a service is disconnected is decided by `CLEAN_SESSION`, which defaults to `True`: the broker keeps nothing for the service between connections, so commands published during a restart or a network outage are lost, and subscriptions are re-established on every reconnect. A service that must not miss an input should set `CLEAN_SESSION = False`; together with `SUBSCRIBE_QOS >= 1` and the stable client id taken from `SERVICE_NAME`, the broker then queues matching messages while the service is away and delivers them on reconnect.
+
+#### Enabling and disabling a service
+
+Every service subscribes to `service/SERVICE_NAME/enabled`. Publishing `0` there stops the service from handling incoming messages (its loops keep running and it keeps publishing); `1` switches handling back on. Any other payload is ignored with a warning, so that an empty retained message cannot silently disable a service.
+
 #### Examples
 
 ```python
@@ -180,6 +192,18 @@ Looped functions that return `False` will not be called again.
 `miqro.loop` takes the same arguments as [Python's `timedelta`](https://docs.python.org/3/library/datetime.html#timedelta-objects). 
 
 MIQRO outputs information about the execution times of loops to the log file in regular intervals.
+
+#### Services with their own I/O source
+
+Between loop runs, the main loop waits in `_wait_for_work(timeout)`, which by default sleeps. A service that is paced by an I/O source of its own -- a blocking serial read, a socket select, a hardware poll -- should override `_wait_for_work` to wait on that source instead:
+
+```python
+    def _wait_for_work(self, timeout):
+        self.serial.timeout = timeout
+        self.read_one_frame()
+```
+
+Do not override `_loop_step`: it is the framework's own step (dispatch incoming messages, run the loops that are due), and replacing it skips loop scheduling. Overriding it raises a `DeprecationWarning` when the service starts.
 
 ### State File
 
