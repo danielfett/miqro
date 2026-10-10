@@ -497,6 +497,50 @@ def test_state_is_saved_atomically(tmp_path):
     assert reloaded.get_path("group_state", "ga", default=None) == "ALARM"
 
 
+def test_unchanged_state_is_not_rewritten(tmp_path, monkeypatch):
+    """Repeated commands saved the same data again, wearing the SD card."""
+    cls = make_state_cls(tmp_path)
+    state = cls(FakeService())
+    state.set_path("group_enabled", "ga", value=False)
+    state.save()
+
+    replaced = []
+    real_replace = miqro.os.replace
+    monkeypatch.setattr(
+        miqro.os, "replace", lambda *a: (replaced.append(a), real_replace(*a))
+    )
+
+    state.set_path("group_enabled", "ga", value=False)
+    state.save()
+    assert replaced == [], "unchanged state was written again"
+
+    reloaded = cls(FakeService())
+    reloaded.save()
+    assert replaced == [], "state loaded from disk was written back unchanged"
+
+    state.set_path("group_enabled", "ga", value=True)
+    state.save()
+    assert len(replaced) == 1
+    assert cls(FakeService()).get_path("group_enabled", "ga", default=None) is True
+
+
+def test_failed_save_is_retried(tmp_path, monkeypatch):
+    service = FakeService()
+    state = make_state_cls(tmp_path)(service)
+    state.set_path("a", value=1)
+
+    def fail(*_):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(miqro.os, "replace", fail)
+    state.save()
+    assert service.failures
+    monkeypatch.undo()
+
+    state.save()
+    assert make_state_cls(tmp_path)(FakeService()).get_path("a", default=None) == 1
+
+
 def test_empty_state_file_is_usable(tmp_path):
     (tmp_path / "fake.yaml").write_text("")
     state = make_state_cls(tmp_path)(FakeService())

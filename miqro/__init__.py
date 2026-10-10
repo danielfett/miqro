@@ -295,6 +295,9 @@ class State:
 
         self._data = self._load()
         self.service.log.debug(f"State: Loaded {self._data}")
+        # What the file holds, as save() would write it; lets save() skip
+        # rewriting an unchanged file.
+        self._saved = dump(self._data)
 
     def _load(self) -> Dict:
         """Load the state file, tolerating anything that is wrong with it.
@@ -369,15 +372,23 @@ class State:
         loses power mid-write, which on the next start would take the service
         down.  Write a temporary file, fsync it, then rename over the target:
         readers see either the old file or the new one.
+
+        Nothing is written when the data is unchanged since the last save:
+        callers save after every command, even one that repeats the current
+        value, and each write wears the SD card.
         """
-        self.service.log.debug(f"State: Saving {self._data}")
         tmp = self._file.with_suffix(self._file.suffix + ".tmp")
         try:
+            text = dump(self._data)
+            if text == self._saved:
+                return
+            self.service.log.debug(f"State: Saving {self._data}")
             with tmp.open("w") as f:
-                dump(self._data, f)
+                f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self._file)
+            self._saved = text
         except Exception as e:
             self.service.log.error(f"State: could not save {self._file}: {e!r}")
             self.service.note_failure(f"state save failed: {e!r}")
