@@ -118,3 +118,18 @@ def test_entities_are_listed_once():
     device = ha_sensors.Device(service, name="Box")
     entity = sensor(device, "Temperatur", "temp")
     assert device.entities == [entity]
+
+
+def test_main_entity_without_name():
+    service = FakeService()
+    device = ha_sensors.Device(service, name="Box")
+    probe = ha_sensors.ChildDevice(device, name="Außen", keep_parent_unique_ids=True)
+    entity = ha_sensors.Sensor(
+        device=probe, name=None, default_entity_id="sensor.Au-en", state_topic_postfix="t/aussen"
+    )
+    assert entity.unique_id == "demo_Box__sensor_Au-en"
+    component = device.build_discovery_payload()["child_devices"][0]["components"][entity.unique_id]
+    assert "name" in component and component["name"] is None
+
+    with pytest.raises(ValueError):
+        ha_sensors.Sensor(device=probe, name=None, state_topic_postfix="t/x")

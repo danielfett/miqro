@@ -193,7 +193,9 @@ class ChildDevice:
 @dataclass
 class EntityWithoutStateTopic:
     device: Device | ChildDevice | None
-    name: str
+    # None: the main entity of its device, shown with the device name alone
+    # (needs a device and an explicit default_entity_id)
+    name: str | None
     display_name: str | None = None
     device_class: str | None = None
     enabled_by_default: bool | None = None
@@ -216,6 +218,11 @@ class EntityWithoutStateTopic:
             
         if self.device:
             self.service = self.device.service
+
+        if self.name is None and (self.device is None or self.default_entity_id is None):
+            raise ValueError(
+                "An entity without name needs a device and a default_entity_id"
+            )
 
         if self.default_entity_id is None:
             self.default_entity_id = f"{self._component}.{clean_string(self.name)}"
@@ -250,6 +257,9 @@ class EntityWithoutStateTopic:
             and k != "service"
         }
         payload["platform"] = self._component
+        if self.name is None:
+            # explicit null: use the device name (omitted would mean a default name)
+            payload["name"] = None
 
         # delete x_callback entries from payload
         for attr_name in dir(self):
