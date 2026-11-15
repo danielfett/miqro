@@ -657,7 +657,7 @@ class Service:
             )
             self.service_config = {}
         else:
-            self.service_config = self.config["services"][self.SERVICE_NAME]
+            self.service_config = self.config["services"][self.SERVICE_NAME] or {}
 
         self.data_topic_prefix = self.service_config.get(
             "data_topic", f"service/{self.SERVICE_NAME}/"
@@ -965,6 +965,7 @@ class Service:
         except Exception as e:
             self.log.exception(e)
             self.note_failure(f"publish to '{topic}' raised {e!r}")
+            self.last_key_values.pop(topic, None)
             return None
 
         # A QoS 0 publish while disconnected is discarded by paho, which reports
@@ -972,6 +973,12 @@ class Service:
         # caller believes was delivered never left the process.
         rc = getattr(info, "rc", 0)
         if rc != 0:
+            # The message was not sent, so it must not count as "already
+            # published" for only_if_changed: otherwise a loop that publishes
+            # the same value again (as happens right after startup, before the
+            # first connection) skips it forever and the broker keeps whatever
+            # it had before -- for a retained topic, possibly a stale value.
+            self.last_key_values.pop(topic, None)
             if self.is_connected:
                 self.log.error(f"MQTT publish to '{topic}' failed with rc={rc}")
                 self.note_failure(f"publish to '{topic}' failed with rc={rc}")

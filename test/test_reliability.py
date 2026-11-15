@@ -584,6 +584,57 @@ def test_publish_failure_while_disconnected_is_not_counted(service, monkeypatch)
     assert service.failure_count == 0, service.last_failure
 
 
+@pytest.mark.parametrize("only_if_changed", [True, timedelta(minutes=5)])
+def test_dropped_publish_is_not_remembered_as_published(
+    service, monkeypatch, only_if_changed
+):
+    """only_if_changed must retry a value whose publish was dropped.
+
+    Loops run before the first connection; if the dropped publish counted, the
+    same value would be skipped from then on and never reach the broker.
+    """
+
+    class FailingInfo:
+        rc = 4
+
+    published = []
+
+    def publish(topic, payload, qos=0, retain=False):
+        if not service.is_connected:
+            return FailingInfo()
+        published.append((topic, payload))
+        return type("I", (), {"rc": 0})()
+
+    monkeypatch.setattr(service.mqtt_client, "publish", publish)
+
+    assert not service.is_connected
+    service.publish("some/topic", "value", only_if_changed=only_if_changed)
+
+    service.mqtt_client.ensure_connected()
+    service.publish("some/topic", "value", only_if_changed=only_if_changed)
+    service.publish("some/topic", "value", only_if_changed=only_if_changed)
+
+    topic = service.data_topic_prefix + "some/topic"
+    assert [p for p in published if p[0] == topic] == [(topic, "value")]
+
+
+def test_publish_that_raises_is_not_remembered_as_published(service, monkeypatch):
+    calls = []
+
+    def publish(topic, payload, qos=0, retain=False):
+        calls.append(payload)
+        if len(calls) == 1:
+            raise OSError("socket gone")
+        return type("I", (), {"rc": 0})()
+
+    monkeypatch.setattr(service.mqtt_client, "publish", publish)
+
+    service.publish("some/topic", "value", only_if_changed=True)
+    service.publish("some/topic", "value", only_if_changed=True)
+
+    assert calls == ["value", "value"]
+
+
 def test_qos_is_forwarded_through_json_helpers(service):
     published = []
     service.mqtt_client.publish = lambda topic, payload, qos=0, retain=False: (
