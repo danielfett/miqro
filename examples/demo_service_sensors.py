@@ -17,7 +17,14 @@ class SensorDemoService(miqro.Service):
             self,
             "Demo Device Miqro Two",
             sw_version="demo-0.1",
-            via_device=ha_device_one,
+            via_device=ha_device_one,  # reached through device one (hub/bridge)
+        )
+        # a part of device one, shown as a device of its own (Home Assistant 2026.11+)
+        ha_device_one_part = miqro.ha_sensors.ChildDevice(ha_device_one, "Demo Part")
+        miqro.ha_sensors.Sensor(
+            ha_device_one_part,
+            "Part Sensor",
+            state_topic_postfix="hello/part",
         )
 
         self.binary_sensor_demo = miqro.ha_sensors.BinarySensor(

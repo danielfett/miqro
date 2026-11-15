@@ -28,6 +28,7 @@ class Device:
     _unique_id: str | None = None
 
     __entities: list["Entity"] = field(default_factory=list)
+    _children: list["ChildDevice"] = field(default_factory=list)
 
     def __post_init__(self):
         self.service.ha_devices.append(self)
@@ -44,8 +45,18 @@ class Device:
     def entities(self):
         return self.__entities
 
+    @property
+    def _entity_unique_id_prefix(self) -> str:
+        return self._unique_id
+
+    @property
+    def children(self):
+        return self._children
+
     def add_entity(self, entity):
-        self.__entities.append(entity)
+        # Entity.__post_init__ runs twice for entities with a state topic
+        if not any(e is entity for e in self.__entities):
+            self.__entities.append(entity)
 
     def build_availability(self) -> list[dict]:
         """The discovery payload's ``availability`` entries.
@@ -91,6 +102,11 @@ class Device:
         for entity in self.entities:
             payload["components"][entity.unique_id] = entity.get_discover_payload()
 
+        if self._children:
+            payload["child_devices"] = [
+                child.build_discovery_payload() for child in self._children
+            ]
+
         return payload
 
     def discovery_topic(self, prefix) -> str:
@@ -107,8 +123,76 @@ class Device:
 
 
 @dataclass
+class ChildDevice:
+    """A part of a physical device, e.g. one outlet of a power strip.
+
+    Home Assistant (2026.11+) shows it as a device of its own with its own
+    name and area (inherited from the parent until one is set), and removes it
+    together with the parent. It is announced in the parent's discovery
+    message; the other device information (manufacturer, model, ...) and the
+    availability belong to the parent. Not to be confused with ``via_device``,
+    which links a separate device to the hub or bridge it is reached through.
+
+    Entities are attached with ``device=child`` as usual. Their unique ID is
+    derived from the child's own ID, so that an existing device (same service
+    and name) can be turned into a child without changing its entities. When
+    moving entities from the parent into a new child, pass
+    ``keep_parent_unique_ids=True`` instead: the entities keep the unique IDs
+    (and thereby entity IDs, history and settings) they had on the parent.
+    """
+
+    parent: Device
+    name: str
+    identifiers: list[str] | str | None = None
+    keep_parent_unique_ids: bool = False
+
+    _unique_id: str | None = None
+    service: "miqro.Service | None" = None
+
+    __entities: list["Entity"] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not isinstance(self.parent, Device):
+            raise ValueError("The parent of a child device must be a Device")
+        self.service = self.parent.service
+        self._unique_id = f"{self.service.SERVICE_NAME}_{clean_string(self.name)}"
+        if self.identifiers is None:
+            self.identifiers = [self._unique_id]
+        else:
+            if isinstance(self.identifiers, str):
+                self.identifiers = [self.identifiers]
+            if self._unique_id not in self.identifiers:
+                self.identifiers.append(self._unique_id)
+        self.parent.children.append(self)
+
+    @property
+    def _entity_unique_id_prefix(self) -> str:
+        if self.keep_parent_unique_ids:
+            return self.parent._entity_unique_id_prefix
+        return self._unique_id
+
+    @property
+    def entities(self):
+        return self.__entities
+
+    def add_entity(self, entity):
+        if not any(e is entity for e in self.__entities):
+            self.__entities.append(entity)
+
+    def build_discovery_payload(self) -> dict:
+        """The entry in the parent's ``child_devices`` list."""
+        return {
+            "identifiers": self.identifiers,
+            "name": self.name,
+            "components": {
+                entity.unique_id: entity.get_discover_payload() for entity in self.entities
+            },
+        }
+
+
+@dataclass
 class EntityWithoutStateTopic:
-    device: Device | None
+    device: Device | ChildDevice | None
     name: str
     display_name: str | None = None
     device_class: str | None = None
@@ -137,7 +221,7 @@ class EntityWithoutStateTopic:
             self.default_entity_id = f"{self._component}.{clean_string(self.name)}"
         if self.unique_id is None:
             if self.device is not None:
-                self.unique_id = f"{self.device._unique_id}__{self.default_entity_id.replace('.', '_')}"
+                self.unique_id = f"{self.device._entity_unique_id_prefix}__{self.default_entity_id.replace('.', '_')}"
             else:
                 self.unique_id = f"{clean_string(self.service.SERVICE_NAME)}__{self.default_entity_id.replace('.', '_')}"
 
